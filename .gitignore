@@ -1,0 +1,10 @@
+.build/
+dist/
+.swiftpm/
+*.xcodeproj
+xcuserdata/
+DerivedData/
+.DS_Store
+node_modules/
+.vscode/
+CLAUDE.md
