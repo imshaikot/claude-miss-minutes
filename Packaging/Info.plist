@@ -37,6 +37,10 @@
             </array>
         </dict>
     </array>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Miss Minutes listens while you hold ⌃ Control, so you can talk to her instead of typing.</string>
+    <key>NSSpeechRecognitionUsageDescription</key>
+    <string>What you say while holding ⌃ Control is turned into text for Miss Minutes, on this Mac when possible.</string>
     <key>LSUIElement</key>
     <true/>
     <key>NSHighResolutionCapable</key>

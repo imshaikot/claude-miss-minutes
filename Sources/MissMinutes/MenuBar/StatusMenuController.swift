@@ -138,6 +138,7 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
         toggle("Wander Around", settings.character.wander, #selector(toggleWander))
         toggle("Gravity", settings.character.gravity, #selector(toggleGravity))
         toggle("Voice", settings.voice.enabled, #selector(toggleVoice))
+        toggle("Hold ⌃ to Talk", settings.listening.holdToTalk, #selector(toggleHoldToTalk))
         toggle("Hologram Effect", settings.character.hologram, #selector(toggleHologram))
         menu.addItem(.separator())
         add("Settings…", #selector(openSettings), key: ",")
@@ -188,5 +189,6 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
     @objc private func toggleWander() { app.store.settings.character.wander.toggle() }
     @objc private func toggleGravity() { app.store.settings.character.gravity.toggle() }
     @objc private func toggleVoice() { app.store.settings.voice.enabled.toggle() }
+    @objc private func toggleHoldToTalk() { app.store.settings.listening.holdToTalk.toggle() }
     @objc private func toggleHologram() { app.store.settings.character.hologram.toggle() }
 }
