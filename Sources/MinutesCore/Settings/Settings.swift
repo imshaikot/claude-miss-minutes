@@ -77,9 +77,12 @@ public struct CharacterSettings: Codable, Equatable {
     public var hologram = true
     public var frameRate = 60
     public var wander = true
-    /// 0 = stays put for minutes, 1 = moves about every half minute.
+    /// 0 = calm (a fidget every quarter minute, a new spot every couple of
+    /// minutes), 1 = busy (something every few seconds, a new spot every 20 s).
     public var restlessness = 0.5
     public var perchOnWindows = true
+    /// Hang from the bottom edges of windows and cling to their sides.
+    public var hangOnEdges = true
     public var perchOnFloor = true
     /// Off: she hovers wherever she is dropped or sent, like a hologram, instead of falling to a ledge.
     public var gravity = true
@@ -100,6 +103,7 @@ public struct CharacterSettings: Codable, Equatable {
         wander = c.value(.wander, d.wander)
         restlessness = c.value(.restlessness, d.restlessness)
         perchOnWindows = c.value(.perchOnWindows, d.perchOnWindows)
+        hangOnEdges = c.value(.hangOnEdges, d.hangOnEdges)
         perchOnFloor = c.value(.perchOnFloor, d.perchOnFloor)
         gravity = c.value(.gravity, d.gravity)
         followCursor = c.value(.followCursor, d.followCursor)
@@ -107,19 +111,57 @@ public struct CharacterSettings: Codable, Equatable {
         shyApps = c.value(.shyApps, d.shyApps)
     }
 
-    /// Seconds between wanders for the current restlessness.
+    /// Seconds between moves to a new spot for the current restlessness.
     public var wanderInterval: ClosedRange<Double> {
-        let base = 180 - 150 * clamp(restlessness, 0, 1)
+        let base = 100 - 80 * clamp(restlessness, 0, 1)
         return base * 0.7...base * 1.3
     }
+
+    /// Seconds between small idle beats (a fidget, a few steps) for the current restlessness.
+    public var idleInterval: ClosedRange<Double> {
+        let base = 16 - 11 * clamp(restlessness, 0, 1)
+        return base * 0.6...base * 1.4
+    }
+}
+
+public enum VoiceEngine: String, Codable, CaseIterable, Identifiable {
+    /// Kokoro, an open-source neural voice that runs on this Mac once downloaded.
+    case kokoro
+    /// The voices built into macOS.
+    case system
+
+    public var id: String { rawValue }
+}
+
+/// Kokoro's English female voices, best first (grades from the model card).
+public enum KokoroVoices {
+    public static let all: [(id: String, title: String)] = [
+        ("af_heart", "Heart (American)"),
+        ("af_bella", "Bella (American)"),
+        ("af_nicole", "Nicole (American, soft)"),
+        ("bf_emma", "Emma (British)"),
+        ("af_aoede", "Aoede (American)"),
+        ("af_kore", "Kore (American)"),
+        ("af_sarah", "Sarah (American)"),
+        ("af_nova", "Nova (American)"),
+        ("af_alloy", "Alloy (American)"),
+        ("bf_isabella", "Isabella (British)"),
+        ("af_sky", "Sky (American)"),
+    ]
 }
 
 public struct VoiceSettings: Codable, Equatable {
     public var enabled = true
-    /// Empty means the best installed English voice.
+    /// Until Kokoro is downloaded she uses the macOS voice below.
+    public var engine = VoiceEngine.kokoro
+    public var kokoroVoice = "af_heart"
+    /// 1 is Kokoro's natural pace.
+    public var kokoroSpeed = 1.05
+    /// macOS voice. Empty means the best installed English voice.
     public var voiceIdentifier = ""
     public var rate = 0.53
-    public var pitch = 1.18
+    /// macOS voices only; pitching a voice far from 1 makes it sound synthetic.
+    public var pitch = 1.08
     public var volume = 0.9
 
     public init() {}
@@ -128,6 +170,9 @@ public struct VoiceSettings: Codable, Equatable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         let d = Self()
         enabled = c.value(.enabled, d.enabled)
+        engine = c.value(.engine, d.engine)
+        kokoroVoice = c.value(.kokoroVoice, d.kokoroVoice)
+        kokoroSpeed = c.value(.kokoroSpeed, d.kokoroSpeed)
         voiceIdentifier = c.value(.voiceIdentifier, d.voiceIdentifier)
         rate = c.value(.rate, d.rate)
         pitch = c.value(.pitch, d.pitch)
@@ -135,10 +180,28 @@ public struct VoiceSettings: Codable, Equatable {
     }
 }
 
+public struct ListeningSettings: Codable, Equatable {
+    /// Hold ⌃ Control on its own, anywhere, to talk to her; let go to send.
+    public var holdToTalk = true
+    /// After she asks permission out loud, listen a few seconds for a spoken
+    /// yes or no, no ⌃ needed. (Holding ⌃ to answer works either way.)
+    public var handsFreeAnswers = true
+
+    public init() {}
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let d = Self()
+        holdToTalk = c.value(.holdToTalk, d.holdToTalk)
+        handsFreeAnswers = c.value(.handsFreeAnswers, d.handsFreeAnswers)
+    }
+}
+
 public struct MinutesSettings: Codable, Equatable {
     public var brain = BrainSettings()
     public var character = CharacterSettings()
     public var voice = VoiceSettings()
+    public var listening = ListeningSettings()
 
     public init() {}
 
@@ -147,6 +210,7 @@ public struct MinutesSettings: Codable, Equatable {
         brain = c.value(.brain, BrainSettings())
         character = c.value(.character, CharacterSettings())
         voice = c.value(.voice, VoiceSettings())
+        listening = c.value(.listening, ListeningSettings())
     }
 }
 

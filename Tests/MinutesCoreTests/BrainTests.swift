@@ -151,7 +151,16 @@ struct SettingsTests {
         #expect(settings.brain.model == "opus")
         #expect(settings.brain.tools == .lookOnly)
         #expect(settings.voice.enabled == false)
+        #expect(settings.voice.engine == .kokoro)
+        #expect(settings.listening.holdToTalk)
         #expect(settings.character == CharacterSettings())
+    }
+
+    @Test func anUnknownVoiceEngineFallsBackToTheDefault() throws {
+        let json = #"{"voice":{"engine":"someday","kokoroVoice":"bf_emma"}}"#
+        let settings = try JSONDecoder().decode(MinutesSettings.self, from: Data(json.utf8))
+        #expect(settings.voice.engine == .kokoro)
+        #expect(settings.voice.kokoroVoice == "bf_emma")
     }
 
     @Test func settingsRoundTrip() throws {
@@ -173,6 +182,8 @@ struct SettingsTests {
         #expect(try BodyCommand.decode(tool: "emote", args: ["mood": "Happy", "gesture": "wave"]) == .emote(mood: .happy, gesture: .wave))
         #expect(try BodyCommand.decode(tool: "move_to", args: ["target": "app", "app": "Safari"]) == .moveTo(.app("Safari"), style: .auto))
         #expect(try BodyCommand.decode(tool: "move_to", args: ["target": "pointer", "style": "teleport"]) == .moveTo(.cursor, style: .teleport))
+        #expect(try BodyCommand.decode(tool: "move_to", args: ["target": "hang", "app": "Notes", "style": "crawl"]) == .moveTo(.hang(app: "Notes"), style: .crawl))
+        #expect(try BodyCommand.decode(tool: "move_to", args: ["target": "hang"]) == .moveTo(.hang(app: nil), style: .auto))
         #expect(try BodyCommand.decode(tool: "set_reminder", args: ["minutes": 1.5, "message": "Stretch!"]) == .setReminder(seconds: 90, message: "Stretch!"))
         #expect(try BodyCommand.decode(tool: "look_at_screen", args: [:]) == .lookAtScreen(screenshot: true))
     }

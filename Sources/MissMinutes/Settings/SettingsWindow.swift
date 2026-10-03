@@ -10,7 +10,8 @@ final class SettingsWindowController {
     private let window: NSWindow
 
     init(app: AppDelegate) {
-        let root = SettingsView(store: app.store, brainInfo: BrainInfo(app: app), preview: { [weak app] text in app?.voice.speak(text) })
+        let root = SettingsView(store: app.store, brainInfo: BrainInfo(app: app), kokoro: app.kokoro,
+                                preview: { [weak app] text in app?.voice.speak(text) })
         window = NSWindow(contentViewController: NSHostingController(rootView: root))
         window.title = "Miss Minutes Settings"
         window.styleMask = [.titled, .closable, .miniaturizable]
@@ -60,13 +61,14 @@ final class BrainInfo: ObservableObject {
 struct SettingsView: View {
     @ObservedObject var store: SettingsStore
     @ObservedObject var brainInfo: BrainInfo
+    var kokoro: KokoroVoice
     var preview: (String) -> Void
 
     var body: some View {
         TabView {
             BrainTab(store: store, info: brainInfo).tabItem { Label("Brain", systemImage: "brain") }
             CharacterTab(store: store).tabItem { Label("Character", systemImage: "figure.wave") }
-            VoiceTab(store: store, preview: preview).tabItem { Label("Voice", systemImage: "waveform") }
+            VoiceTab(store: store, kokoro: kokoro, preview: preview).tabItem { Label("Voice", systemImage: "waveform") }
             GeneralTab(store: store).tabItem { Label("General", systemImage: "gearshape") }
         }
         .frame(width: 600, height: 620)
@@ -199,12 +201,12 @@ private struct CharacterTab: View {
             } header: { Text("Look") }
 
             Section {
-                Toggle("Wander around on her own", isOn: $store.settings.character.wander)
+                Toggle("Wander, stroll and climb around on her own", isOn: $store.settings.character.wander)
                 LabeledContent("Restlessness") {
                     Slider(value: $store.settings.character.restlessness, in: 0...1) { EmptyView() } minimumValueLabel: { Text("Calm") } maximumValueLabel: { Text("Busy") }
                 }
-                .disabled(!store.settings.character.wander)
-                Toggle("Sit on window edges", isOn: $store.settings.character.perchOnWindows)
+                Toggle("Sit on top of windows", isOn: $store.settings.character.perchOnWindows)
+                Toggle("Hang from and climb the edges of windows", isOn: $store.settings.character.hangOnEdges)
                 Toggle("Stand on the Dock / bottom of the screen", isOn: $store.settings.character.perchOnFloor)
                 Toggle("Gravity (off: she hovers wherever you drop her)", isOn: $store.settings.character.gravity)
                 TextField("Hide while these apps are frontmost", text: Binding(
@@ -221,31 +223,109 @@ private struct CharacterTab: View {
 
 private struct VoiceTab: View {
     @ObservedObject var store: SettingsStore
+    @ObservedObject var kokoro: KokoroVoice
     var preview: (String) -> Void
     private let voices = SpeechEngine.availableVoices()
+    private let hasNaturalVoice = SpeechEngine.hasNaturalVoice
 
     var body: some View {
         Form {
             Section {
                 Toggle("Speak replies aloud", isOn: $store.settings.voice.enabled)
-                Picker("Voice", selection: $store.settings.voice.voiceIdentifier) {
-                    Text("Automatic (best installed)").tag("")
-                    ForEach(voices) { v in Text("\(v.name) — \(v.language) · \(v.quality)").tag(v.id) }
+                Picker("Voice engine", selection: $store.settings.voice.engine) {
+                    Text("Kokoro: neural, runs on this Mac").tag(VoiceEngine.kokoro)
+                    Text("macOS voices").tag(VoiceEngine.system)
                 }
-                LabeledContent("Speed") { Slider(value: $store.settings.voice.rate, in: 0.35...0.65) { EmptyView() } }
-                LabeledContent("Pitch") { Slider(value: $store.settings.voice.pitch, in: 0.8...1.6) { EmptyView() } }
                 LabeledContent("Volume") { Slider(value: $store.settings.voice.volume, in: 0...1) { EmptyView() } }
                 HStack {
                     Spacer()
                     Button("Preview") { preview("Well hey there, sugar! This is how I sound. Right on time, as always.") }
                 }
             } header: { Text("Voice") }
+
+            if store.settings.voice.engine == .kokoro {
+                Section {
+                    KokoroStatus(kokoro: kokoro)
+                    Picker("Voice", selection: $store.settings.voice.kokoroVoice) {
+                        ForEach(KokoroVoices.all, id: \.id) { Text($0.title).tag($0.id) }
+                    }
+                    LabeledContent("Speed") { Slider(value: $store.settings.voice.kokoroSpeed, in: 0.8...1.3) { EmptyView() } }
+                } header: { Text("Kokoro") } footer: {
+                    Text("Kokoro-82M is an open-source (Apache-2.0) text-to-speech model. The download comes from npm and Hugging Face; after that it runs offline and nothing you hear leaves this Mac.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
+
             Section {
-                Text("Better voices: System Settings ▸ Accessibility ▸ Spoken Content ▸ System Voice ▸ Manage Voices. Enhanced and Premium English voices appear here once downloaded.")
-                    .font(.caption).foregroundStyle(.secondary)
+                Picker("Voice", selection: $store.settings.voice.voiceIdentifier) {
+                    Text("Automatic (best installed)").tag("")
+                    ForEach(voices) { v in Text("\(v.name) — \(v.language) · \(v.quality)").tag(v.id) }
+                }
+                LabeledContent("Speed") { Slider(value: $store.settings.voice.rate, in: 0.35...0.65) { EmptyView() } }
+                LabeledContent("Pitch") { Slider(value: $store.settings.voice.pitch, in: 0.8...1.6) { EmptyView() } }
+                if !hasNaturalVoice {
+                    HStack(alignment: .top) {
+                        Text("Only compact voices are installed, and they sound robotic. Download an Enhanced or Premium one (Ava or Zoe suit her) under Spoken Content ▸ System Voice ▸ Manage Voices.")
+                            .font(.caption).foregroundStyle(.secondary)
+                        Button("Open…") {
+                            NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.Accessibility-Settings.extension")!)
+                        }
+                    }
+                }
+            } header: {
+                Text(store.settings.voice.engine == .kokoro ? "macOS voice (used until Kokoro is ready)" : "macOS voice")
             }
         }
         .formStyle(.grouped)
+    }
+}
+
+/// Download, progress, and what to do when something went wrong.
+private struct KokoroStatus: View {
+    @ObservedObject var kokoro: KokoroVoice
+
+    var body: some View {
+        switch kokoro.state {
+        case .notInstalled:
+            row("Not downloaded yet: about 330 MB, once.", button: "Download") { kokoro.install() }
+        case let .installing(fraction, step):
+            VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                    Text(step).foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Cancel") { kokoro.cancelInstall() }
+                }
+                if let fraction { ProgressView(value: fraction) } else { ProgressView().progressViewStyle(.linear) }
+            }
+        case .stopped:
+            row("Downloaded. Starts when she next speaks.", button: "Remove") { kokoro.uninstall() }
+        case .starting:
+            HStack {
+                ProgressView().controlSize(.small)
+                Text("Warming up…").foregroundStyle(.secondary)
+            }
+        case .ready:
+            row("Ready, running on this Mac.", button: "Remove") { kokoro.uninstall() }
+        case let .failed(reason):
+            VStack(alignment: .leading, spacing: 6) {
+                Text(reason).font(.caption).foregroundStyle(.red).textSelection(.enabled)
+                HStack {
+                    Spacer()
+                    if kokoro.isInstalled { Button("Remove") { kokoro.uninstall() } }
+                    Button("Try Again") { kokoro.retry() }
+                }
+            }
+        }
+    }
+
+    private func row(_ text: String, button: String, action: @escaping () -> Void) -> some View {
+        LabeledContent("Status") {
+            HStack {
+                Text(text).foregroundStyle(.secondary)
+                Spacer()
+                Button(button, action: action)
+            }
+        }
     }
 }
 
@@ -259,7 +339,10 @@ private struct GeneralTab: View {
     var body: some View {
         Form {
             Section {
-                LabeledContent("Talk to her", value: "⌃⌥M (anywhere)")
+                LabeledContent("Talk to her", value: "Hold ⌃ and speak, let go to send")
+                LabeledContent("Type to her", value: "⌃⌥M (anywhere)")
+                Toggle("Hold ⌃ Control to talk", isOn: $store.settings.listening.holdToTalk)
+                Toggle("Listen for yes or no after she asks permission", isOn: $store.settings.listening.handsFreeAnswers)
                 LabeledContent("Click her", value: "Opens her speech bubble")
                 LabeledContent("Drag her", value: "Pick her up and drop her anywhere")
                 Toggle("Launch at login", isOn: $launchAtLogin)
