@@ -1,0 +1,139 @@
+name: Release
+
+# Push a tag that matches VERSION (git tag -a v0.1.0 -m "…" && git push origin v0.1.0).
+# The tag message opens the release notes.
+#
+# Signing: ad-hoc by default. Add these repository secrets to sign with a Developer ID
+# and notarize, so the app opens without any Gatekeeper prompt:
+#   MACOS_CERTIFICATE           base64 of the "Developer ID Application" .p12
+#   MACOS_CERTIFICATE_PASSWORD  that .p12's password
+#   APPLE_ID, APPLE_TEAM_ID, APPLE_APP_PASSWORD  (app-specific password) for notarytool
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to rebuild, e.g. v0.1.0
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-26
+    env:
+      TAG: ${{ inputs.tag || github.ref_name }}
+      DEVELOPER_ID: ${{ secrets.MACOS_CERTIFICATE != '' }}
+      NOTARIZE: ${{ secrets.MACOS_CERTIFICATE != '' && secrets.APPLE_APP_PASSWORD != '' }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          fetch-depth: 0
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+
+      - name: Check the tag matches VERSION
+        run: |
+          version="$(cat VERSION)"
+          [ "${TAG#v}" = "$version" ] || { echo "::error::Tag $TAG does not match VERSION $version"; exit 1; }
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+
+      - name: Test
+        run: |
+          swift test
+          make test-bridge test-voice
+
+      - name: Import the Developer ID certificate
+        if: env.DEVELOPER_ID == 'true'
+        env:
+          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+        run: |
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          password="$(uuidgen)"
+          echo "$MACOS_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/certificate.p12"
+          security create-keychain -p "$password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          security import "$RUNNER_TEMP/certificate.p12" -P "$MACOS_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$keychain"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$password" "$keychain" >/dev/null
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+          rm "$RUNNER_TEMP/certificate.p12"
+          identity="$(security find-identity -v -p codesigning "$keychain" | grep -o '"Developer ID Application: [^"]*"' | head -1 | tr -d '"')"
+          [ -n "$identity" ] || { echo "::error::No Developer ID Application identity in MACOS_CERTIFICATE"; exit 1; }
+          echo "CODESIGN_IDENTITY=$identity" >> "$GITHUB_ENV"
+
+      - name: Build the universal app
+        run: Scripts/build-app.sh
+
+      - name: Notarize the app
+        if: env.NOTARIZE == 'true'
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: Scripts/notarize.sh "dist/Miss Minutes.app"
+
+      - name: Package DMG and zip
+        run: |
+          Scripts/make-dmg.sh
+          ditto -c -k --keepParent "dist/Miss Minutes.app" "dist/MissMinutes-$VERSION.zip"
+
+      - name: Sign and notarize the DMG
+        if: env.NOTARIZE == 'true'
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: |
+          codesign --sign "$CODESIGN_IDENTITY" --timestamp "dist/MissMinutes-$VERSION.dmg"
+          Scripts/notarize.sh "dist/MissMinutes-$VERSION.dmg"
+
+      - name: Checksums
+        working-directory: dist
+        run: shasum -a 256 "MissMinutes-$VERSION.dmg" "MissMinutes-$VERSION.zip" | tee SHA256SUMS.txt
+
+      - name: Write release notes
+        run: |
+          # actions/checkout turns annotated tags into lightweight ones; fetch the real tag for its message.
+          git fetch --force origin "refs/tags/$TAG:refs/tags/$TAG"
+          {
+            git for-each-ref --format='%(contents:subject)%0a%0a%(contents:body)' "refs/tags/$TAG"
+            echo
+            echo "## Install"
+            echo
+            echo "**One line**: downloads this release, checks its checksum, installs it to Applications and opens her."
+            echo
+            echo '```sh'
+            echo 'curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/Scripts/install.sh | bash'
+            echo '```'
+            echo
+            if [ "$NOTARIZE" = "true" ]; then
+              echo "**Or the DMG**: open it and drag Miss Minutes into Applications. The app is signed with a Developer ID and notarized by Apple."
+            else
+              echo "**Or the DMG**: open it and drag Miss Minutes into Applications. The app is ad-hoc signed but not notarized, so macOS blocks the first launch: open **System Settings ▸ Privacy & Security** and click **Open Anyway** (or run \`xattr -dr com.apple.quarantine \"/Applications/Miss Minutes.app\"\`). The one-line installer skips this step."
+            fi
+            echo
+            echo "Requires macOS 14 or later (Apple silicon or Intel) and [Claude Code](https://claude.com/claude-code), installed and signed in. Node.js 18+ is optional: it lets Claude move her and powers the neural voice."
+          } > "$RUNNER_TEMP/notes.md"
+          cat "$RUNNER_TEMP/notes.md"
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          assets=("dist/MissMinutes-$VERSION.dmg" "dist/MissMinutes-$VERSION.zip" dist/SHA256SUMS.txt)
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "${assets[@]}" --clobber
+          else
+            gh release create "$TAG" "${assets[@]}" --title "Miss Minutes $VERSION" --notes-file "$RUNNER_TEMP/notes.md" --verify-tag
+          fi
+
+      - name: Remove the signing keychain
+        if: always() && env.DEVELOPER_ID == 'true'
+        run: security delete-keychain "$RUNNER_TEMP/signing.keychain-db" || true
