@@ -53,8 +53,17 @@ cp bridge/miss-minutes-mcp.mjs bridge/package.json "$APP/Contents/Resources/brid
 # Only the neural voice's installer: its packages and model are downloaded on request.
 cp voice/miss-minutes-voice.mjs voice/package.json voice/package-lock.json "$APP/Contents/Resources/voice/"
 
-echo "▸ Signing (ad-hoc)"
-codesign --force --deep --sign "${CODESIGN_IDENTITY:--}" --timestamp=none "$APP"
-codesign --verify --verbose=2 "$APP"
+# Ad-hoc by default. With CODESIGN_IDENTITY="Developer ID Application: …" it signs for
+# notarization: hardened runtime, a secure timestamp and the microphone entitlement.
+IDENTITY="${CODESIGN_IDENTITY:--}"
+if [ "$IDENTITY" = "-" ]; then
+  echo "▸ Signing (ad-hoc)"
+  codesign --force --deep --sign - --timestamp=none "$APP"
+else
+  echo "▸ Signing as $IDENTITY"
+  codesign --force --deep --sign "$IDENTITY" --options runtime --timestamp \
+    --entitlements Packaging/MissMinutes.entitlements "$APP"
+fi
+codesign --verify --deep --strict --verbose=2 "$APP"
 
 echo "✓ $APP"
