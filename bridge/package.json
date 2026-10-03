@@ -1,0 +1,11 @@
+{
+  "name": "miss-minutes-bridge",
+  "version": "0.1.0",
+  "description": "Miss Minutes body bridge: a zero-dependency MCP server that forwards Claude Code tool calls to the app.",
+  "type": "module",
+  "private": true,
+  "license": "Apache-2.0",
+  "bin": { "miss-minutes-mcp": "./miss-minutes-mcp.mjs" },
+  "scripts": { "test": "node --test 'test/**/*.test.mjs'" },
+  "engines": { "node": ">=18" }
+}
