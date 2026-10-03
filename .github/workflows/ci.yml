@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+      - name: Toolchain
+        run: swift --version
+      - name: Build
+        run: swift build
+      - name: Swift tests
+        run: swift test
+      - name: Bridge and voice tests
+        run: make test-bridge test-voice
+      - name: Package universal app
+        run: Scripts/build-app.sh
+      - name: Package DMG
+        run: Scripts/make-dmg.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MissMinutes-dmg
+          path: dist/*.dmg
+          retention-days: 14
