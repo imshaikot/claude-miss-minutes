@@ -54,6 +54,13 @@ public struct SceneSnapshot: Equatable, Codable {
 
     public func window(id: Int) -> WindowInfo? { windows.first { $0.id == id } }
 
+    /// Same displays and same windows in the same places, ignoring the pointer
+    /// and which app is frontmost: nothing she stands on has changed.
+    public func sameLayout(as other: SceneSnapshot) -> Bool {
+        screens == other.screens && windows.count == other.windows.count
+            && zip(windows, other.windows).allSatisfy { $0.id == $1.id && $0.frame == $1.frame }
+    }
+
     private func distance(_ rect: CGRect, _ p: CGPoint) -> CGFloat {
         let dx = max(rect.minX - p.x, 0, p.x - rect.maxX)
         let dy = max(rect.minY - p.y, 0, p.y - rect.maxY)
@@ -83,11 +90,19 @@ public enum Posture: String, Codable {
     case sit, stand
     /// Hovering in mid-air (hologram style); used when gravity is off.
     case float
+    /// Hanging by her hands from a window's bottom edge.
+    case hang
+    /// Clinging to the outside of a window's side.
+    case cling
 }
 
 public enum Surface: Equatable, Codable {
     /// The top edge of a window: she sits with her legs over the title bar.
     case windowTop(windowID: Int, app: String)
+    /// The bottom edge of a window: she hangs below it by her hands.
+    case windowBottom(windowID: Int, app: String)
+    /// The outside of a window's left or right side: she clings to it.
+    case windowSide(windowID: Int, app: String, left: Bool)
     /// The floor of a display (top of the Dock, or the bottom of the screen).
     case floor(screen: Int)
     /// Anywhere on screen, hovering.
@@ -95,12 +110,14 @@ public enum Surface: Equatable, Codable {
 }
 
 /// A place she can be: the surface, the anchor point on it and how she rests there.
+/// The anchor is always level with her feet, whatever her posture, so every
+/// way of travelling lines up with every way of resting.
 public struct Perch: Equatable, Codable {
     public var surface: Surface
     public var point: CGPoint
     public var posture: Posture
-    /// For window perches: distance from the window's left edge, so she rides
-    /// along when the window moves.
+    /// For window perches: distance from the window's left edge (top and
+    /// bottom) or bottom edge (sides), so she rides along when the window moves.
     public var offset: CGFloat
 
     public init(surface: Surface, point: CGPoint, posture: Posture, offset: CGFloat = 0) {
@@ -111,8 +128,18 @@ public struct Perch: Equatable, Codable {
     }
 
     public var windowID: Int? {
-        if case let .windowTop(id, _) = surface { return id }
-        return nil
+        switch surface {
+        case let .windowTop(id, _), let .windowBottom(id, _), let .windowSide(id, _, _): return id
+        case .floor, .air: return nil
+        }
+    }
+
+    /// The app whose window she is on.
+    public var app: String? {
+        switch surface {
+        case let .windowTop(_, app), let .windowBottom(_, app), let .windowSide(_, app, _): return app
+        case .floor, .air: return nil
+        }
     }
 }
 
@@ -124,4 +151,11 @@ public enum MoveTarget: Equatable {
     case cursor
     case screenSide(left: Bool)
     case point(CGPoint)
+    /// A short way along whatever she is on: a few steps, a climb, a shimmy.
+    case stroll
+    /// Somewhere else on an app's windows (the frontmost app when nil), any
+    /// way she can be there: sitting, hanging or clinging.
+    case explore(app: String?)
+    /// Hanging from or clinging to an edge of an app's window (the frontmost app when nil).
+    case hang(app: String?)
 }

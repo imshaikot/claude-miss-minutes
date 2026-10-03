@@ -1,6 +1,6 @@
 import CoreGraphics
 
-/// Tunables for where she may sit. Distances are points at scale 1; use `scaled`.
+/// Tunables for where she may be. Distances are points at scale 1; use `scaled`.
 public struct PerchRules: Equatable {
     /// Half her width including resting hands: the anchor keeps this far from obstacles.
     public var halfWidth: CGFloat = 78
@@ -9,23 +9,55 @@ public struct PerchRules: Equatable {
     /// Keep clear of the traffic-light buttons at a window's top-left.
     public var leftInset: CGFloat = 110
     public var rightInset: CGFloat = 80
+    /// Hanging under a bottom edge: the edge is this far above her anchor (her hands grip just below it).
+    public var hangReach: CGFloat = Motions.hangGrip + 10
+    /// Half her width while hanging.
+    public var hangHalfWidth: CGFloat = 62
+    /// Her hands stay this far inside a window's bottom corners.
+    public var hangInset: CGFloat = 44
+    /// Room needed below a hanging anchor for her dangling shoes.
+    public var hangDrop: CGFloat = 14
+    /// Clinging to a side: her anchor is this far out from the edge...
+    public var clingReach: CGFloat = Motions.clingGrip + 8
+    /// ...and her far side this much further out.
+    public var clingAway: CGFloat = 60
+    /// A clinging anchor stays this far below the window's top, so her hand is on the side.
+    public var clingTop: CGFloat = 150
+    /// Her height above the anchor, standing or clinging.
+    public var height: CGFloat = 165
+    /// The longest hop between ledges, and the longest drop onto one straight below.
+    public var jump: CGFloat = 300
+    public var drop: CGFloat = 420
+    public var dropReach: CGFloat = 220
     public var minWindowSize = CGSize(width: 320, height: 180)
     public var useWindows = true
+    /// Hang from window bottoms and cling to window sides.
+    public var useEdges = true
     public var useFloor = true
     public var avoidApps: Set<String> = []
     /// Spots closer than this to the pointer are avoided (she stays out of the way).
     public var cursorComfort: CGFloat = 170
+    /// The character scale these distances were scaled by.
+    public private(set) var scale: CGFloat = 1
 
     public init() {}
 
     public func scaled(_ s: CGFloat) -> PerchRules {
         var r = self
-        r.halfWidth *= s
-        r.headroom *= s
+        let lengths: [WritableKeyPath<PerchRules, CGFloat>] = [
+            \.halfWidth, \.headroom, \.hangReach, \.hangHalfWidth, \.hangInset, \.hangDrop,
+            \.clingReach, \.clingAway, \.clingTop, \.height, \.jump, \.drop, \.dropReach,
+        ]
+        for key in lengths { r[keyPath: key] *= s }
         r.leftInset = max(leftInset, halfWidth * s)
         r.rightInset = max(rightInset, halfWidth * s)
         r.cursorComfort *= max(1, s)
+        r.scale = scale * s
         return r
+    }
+
+    public func avoids(_ app: String) -> Bool {
+        avoidApps.contains { $0.caseInsensitiveCompare(app) == .orderedSame }
     }
 }
 
@@ -34,9 +66,9 @@ public struct ScoredPerch: Equatable {
     public var score: CGFloat
 }
 
-/// Turns a `SceneSnapshot` into places that make sense to sit: visible top
-/// edges of windows (not hidden behind other windows, with room under the menu
-/// bar) and the floor of each display. Pure geometry, fully unit-tested.
+/// Chooses where she goes. The geometry (which spots exist and are safe, how
+/// to get between them) is the `ScreenMap`'s; the planner adds taste: sampled
+/// candidates, scores, and the weighted-random picks that keep her lively.
 public struct PerchPlanner {
     public var rules: PerchRules
 
@@ -44,62 +76,18 @@ public struct PerchPlanner {
         self.rules = rules
     }
 
-    struct Ledge {
-        var surface: Surface
-        var y: CGFloat
-        var spans: [ClosedRange<CGFloat>]
-        var posture: Posture
-        var depth: Int
-        var window: WindowInfo?
-        var screen: Int
-    }
-
-    func ledges(in scene: SceneSnapshot) -> [Ledge] {
-        var result: [Ledge] = []
-        if rules.useWindows {
-            for (depth, w) in scene.windows.enumerated() {
-                guard w.frame.width >= rules.minWindowSize.width, w.frame.height >= rules.minWindowSize.height,
-                      !rules.avoidApps.contains(where: { $0.caseInsensitiveCompare(w.app) == .orderedSame }) else { continue }
-                let y = w.frame.maxY
-                guard let screenIndex = scene.screens.firstIndex(where: { $0.frame.contains(CGPoint(x: w.frame.midX, y: y - 1)) }) else { continue }
-                let visible = scene.screens[screenIndex].visible
-                guard y + rules.headroom <= visible.maxY, y > visible.minY + 60 else { continue }
-                let lower = max(w.frame.minX + rules.leftInset, visible.minX + rules.halfWidth)
-                let upper = min(w.frame.maxX - rules.rightInset, visible.maxX - rules.halfWidth)
-                guard upper >= lower else { continue }
-                var spans = [lower...upper]
-                let band = (y - 6)...(y + rules.headroom)
-                for front in scene.windows[..<depth] where front.frame.minY < band.upperBound && front.frame.maxY > band.lowerBound {
-                    spans = subtract(spans, (front.frame.minX - rules.halfWidth)...(front.frame.maxX + rules.halfWidth))
-                }
-                guard !spans.isEmpty else { continue }
-                result.append(Ledge(surface: .windowTop(windowID: w.id, app: w.app), y: y, spans: spans,
-                                    posture: .sit, depth: depth, window: w, screen: screenIndex))
-            }
-        }
-        if rules.useFloor || result.isEmpty {
-            for (index, screen) in scene.screens.enumerated() {
-                let v = screen.visible
-                let lower = v.minX + rules.halfWidth, upper = v.maxX - rules.halfWidth
-                guard upper > lower else { continue }
-                result.append(Ledge(surface: .floor(screen: index), y: v.minY, spans: [lower...upper],
-                                    posture: .stand, depth: scene.windows.count, window: nil, screen: index))
-            }
-        }
-        return result
-    }
+    /// The deterministic map of `scene`.
+    public func map(_ scene: SceneSnapshot) -> ScreenMap { ScreenMap(scene: scene, rules: rules) }
 
     public func candidates(in scene: SceneSnapshot, current: Perch? = nil) -> [ScoredPerch] {
+        let map = map(scene)
         var out: [ScoredPerch] = []
-        for ledge in ledges(in: scene) {
+        for ledge in map.ledges {
             for span in ledge.spans {
                 let width = span.upperBound - span.lowerBound
                 let fractions: [CGFloat] = width < 40 ? [0.5] : [0.15, 0.5, 0.85]
                 for f in fractions {
-                    let x = span.lowerBound + width * f
-                    let point = CGPoint(x: x, y: ledge.y)
-                    let perch = Perch(surface: ledge.surface, point: point, posture: ledge.posture,
-                                      offset: ledge.window.map { x - $0.frame.minX } ?? 0)
+                    let perch = ledge.perch(at: span.lowerBound + width * f)
                     out.append(ScoredPerch(perch: perch, score: score(perch, ledge: ledge, scene: scene, current: current)))
                 }
             }
@@ -112,9 +100,16 @@ public struct PerchPlanner {
         if let w = ledge.window {
             s = 1 / (1 + 0.6 * CGFloat(ledge.depth))
             if let front = scene.frontPID, w.pid == front { s += 1.2 }
-            // The right-hand part of a window is usually less busy than the left.
-            let rel = (perch.point.x - w.frame.minX) / max(w.frame.width, 1)
-            s *= 0.8 + 0.4 * rel
+            if ledge.axis == .horizontal {
+                // The right-hand part of a window is usually less busy than the left.
+                let rel = (perch.point.x - w.frame.minX) / max(w.frame.width, 1)
+                s *= 0.8 + 0.4 * rel
+            }
+            switch ledge.posture {
+            case .hang: s *= 0.8
+            case .cling: s *= 0.7
+            case .sit, .stand, .float: break
+            }
         } else {
             s = 0.55
         }
@@ -125,15 +120,19 @@ public struct PerchPlanner {
 
     /// A weighted-random pick among sensible spots.
     public func choose<R: RandomNumberGenerator>(in scene: SceneSnapshot, current: Perch?, using rng: inout R) -> Perch? {
-        let all = candidates(in: scene, current: current)
-        let total = all.reduce(0) { $0 + $1.score * $1.score }
-        guard total > 0 else { return all.first?.perch }
+        pick(from: candidates(in: scene, current: current), using: &rng)
+    }
+
+    /// Weighted by score squared, so good spots win most of the time but not every time.
+    func pick<R: RandomNumberGenerator>(from pool: [ScoredPerch], using rng: inout R) -> Perch? {
+        let total = pool.reduce(0) { $0 + $1.score * $1.score }
+        guard total > 0 else { return pool.first?.perch }
         var roll = CGFloat(Double.random(in: 0..<1, using: &rng)) * total
-        for c in all {
+        for c in pool {
             roll -= c.score * c.score
             if roll <= 0 { return c.perch }
         }
-        return all.last?.perch
+        return pool.last?.perch
     }
 
     public func perch<R: RandomNumberGenerator>(for target: MoveTarget, in scene: SceneSnapshot, current: Perch?, using rng: inout R) -> Perch? {
@@ -141,12 +140,10 @@ public struct PerchPlanner {
         case .random:
             return choose(in: scene, current: current, using: &rng)
         case let .app(name):
-            let matches = candidates(in: scene, current: current).filter {
-                if case let .windowTop(_, app) = $0.perch.surface { return app.localizedCaseInsensitiveContains(name) }
-                return false
-            }
-            if let best = matches.max(by: { $0.score < $1.score }) { return best.perch }
-            // No free top edge (a maximized window, say): stand on the floor beneath the app's window.
+            let mine = candidates(in: scene, current: current).filter { $0.perch.app?.localizedCaseInsensitiveContains(name) == true }
+            let seats = mine.filter { $0.perch.posture == .sit }
+            if let best = (seats.isEmpty ? mine : seats).max(by: { $0.score < $1.score }) { return best.perch }
+            // No free edge (a maximized window, say): stand on the floor beneath the app's window.
             guard let window = scene.windows.first(where: { $0.app.localizedCaseInsensitiveContains(name) }),
                   let index = scene.screens.firstIndex(where: { $0.frame.intersects(window.frame) }) else { return nil }
             let v = scene.screens[index].visible
@@ -171,65 +168,63 @@ public struct PerchPlanner {
             return Perch(surface: .floor(screen: index), point: CGPoint(x: x, y: v.minY), posture: .stand)
         case let .point(p):
             return landing(below: p, in: scene)
+        case .stroll:
+            return stroll(from: current, in: scene, using: &rng)
+        case let .explore(app):
+            return explore(app: app ?? scene.frontApp, in: scene, current: current, using: &rng)
+        case let .hang(app):
+            let edges = candidates(in: scene, current: current).filter { $0.perch.posture == .hang || $0.perch.posture == .cling }
+            let name = app ?? scene.frontApp
+            let mine = edges.filter { c in name.map { c.perch.app?.localizedCaseInsensitiveContains($0) == true } ?? true }
+            // A named app with no free edge has no answer; for "wherever I'm working" any window will do.
+            return (mine.isEmpty && app == nil ? edges : mine).max { $0.score < $1.score }?.perch
         }
+    }
+
+    /// Somewhere else on `app`'s windows, favouring a different way of being
+    /// there (hanging after sitting, say). Anywhere sensible when the app has no room.
+    func explore<R: RandomNumberGenerator>(app: String?, in scene: SceneSnapshot, current: Perch?, using rng: inout R) -> Perch? {
+        var pool = candidates(in: scene, current: current).filter { c in
+            guard let app else { return c.perch.windowID != nil }
+            return c.perch.app?.localizedCaseInsensitiveContains(app) == true
+        }
+        if let current {
+            pool = pool.filter { $0.perch.point.distance(to: current.point) > rules.halfWidth * 1.5 }.map {
+                var c = $0
+                if c.perch.posture != current.posture { c.score *= 1.5 }
+                return c
+            }
+        }
+        return pick(from: pool, using: &rng) ?? choose(in: scene, current: current, using: &rng)
+    }
+
+    /// A short way along whatever she is on: a few steps along a ledge, a
+    /// climb up or down a side, a shimmy under a bottom edge, a drift in the air.
+    public func stroll<R: RandomNumberGenerator>(from perch: Perch?, in scene: SceneSnapshot, using rng: inout R) -> Perch? {
+        guard let perch else { return nil }
+        let map = map(scene)
+        if perch.surface == .air {
+            let drift = CGPoint(x: CGFloat.random(in: -3...3, using: &rng), y: CGFloat.random(in: -1...1, using: &rng)) * rules.halfWidth
+            return map.hover(at: perch.point + drift)
+        }
+        guard let ledge = map.ledge(for: perch.surface) else { return nil }
+        let t = ledge.coordinate(of: perch.point)
+        guard let span = ledge.span(containing: t, slack: 2) else { return nil }
+        let shortest = rules.halfWidth * 0.8, longest = rules.halfWidth * 4
+        let ways = [(CGFloat(-1), t - span.lowerBound), (CGFloat(1), span.upperBound - t)].filter { $0.1 >= shortest }
+        guard !ways.isEmpty else { return nil }
+        let way = ways[ways.count == 1 ? 0 : Int.random(in: 0...1, using: &rng)]
+        let distance = CGFloat.random(in: shortest...min(longest, way.1), using: &rng)
+        return ledge.perch(at: clamp(t + way.0 * distance, span.lowerBound, span.upperBound))
     }
 
     /// A hovering spot at `point`, kept fully on its display.
-    public func hover(at point: CGPoint, in scene: SceneSnapshot) -> Perch? {
-        guard let screen = scene.screen(containing: point) else { return nil }
-        let v = screen.visible
-        let x = clamp(point.x, v.minX + rules.halfWidth, max(v.minX + rules.halfWidth, v.maxX - rules.halfWidth))
-        let y = clamp(point.y, v.minY + 20, max(v.minY + 20, v.maxY - rules.headroom * 1.6))
-        return Perch(surface: .air, point: CGPoint(x: x, y: y), posture: .float)
-    }
+    public func hover(at point: CGPoint, in scene: SceneSnapshot) -> Perch? { map(scene).hover(at: point) }
 
     /// The first surface under `point`: what she lands on when dropped or when her ledge vanishes.
-    public func landing(below point: CGPoint, in scene: SceneSnapshot) -> Perch? {
-        var best: (Ledge, CGFloat)?
-        for ledge in ledges(in: scene) where ledge.y <= point.y + 1 {
-            guard let span = ledge.spans.first(where: { $0.contains(point.x) }) else { continue }
-            if best == nil || ledge.y > best!.0.y { best = (ledge, clamp(point.x, span.lowerBound, span.upperBound)) }
-        }
-        if let (ledge, x) = best {
-            return Perch(surface: ledge.surface, point: CGPoint(x: x, y: ledge.y), posture: ledge.posture,
-                         offset: ledge.window.map { x - $0.frame.minX } ?? 0)
-        }
-        guard let screen = scene.screen(containing: point), let index = scene.screens.firstIndex(of: screen) else { return nil }
-        let v = screen.visible
-        let x = clamp(point.x, v.minX + rules.halfWidth, max(v.minX + rules.halfWidth, v.maxX - rules.halfWidth))
-        return Perch(surface: .floor(screen: index), point: CGPoint(x: x, y: v.minY), posture: .stand)
-    }
+    public func landing(below point: CGPoint, in scene: SceneSnapshot) -> Perch? { map(scene).landing(below: point) }
 
     /// Where a window perch is now (the window may have moved), or nil if it is
-    /// gone, too small, hidden behind another window, or out of headroom.
-    public func relocate(_ perch: Perch, in scene: SceneSnapshot) -> Perch? {
-        switch perch.surface {
-        case let .windowTop(id, _):
-            guard let ledge = ledges(in: scene).first(where: { $0.surface == perch.surface }),
-                  let window = scene.window(id: id) else { return nil }
-            let x = window.frame.minX + perch.offset
-            guard ledge.spans.contains(where: { $0.contains(x) }) else { return nil }
-            var moved = perch
-            moved.point = CGPoint(x: x, y: ledge.y)
-            return moved
-        case let .floor(index):
-            guard index < scene.screens.count else { return nil }
-            var moved = perch
-            moved.point.y = scene.screens[index].visible.minY
-            return moved
-        case .air:
-            return scene.screen(containing: perch.point) == nil ? nil : perch
-        }
-    }
-}
-
-/// Removes `cut` from a set of disjoint ranges.
-func subtract(_ spans: [ClosedRange<CGFloat>], _ cut: ClosedRange<CGFloat>) -> [ClosedRange<CGFloat>] {
-    var out: [ClosedRange<CGFloat>] = []
-    for s in spans {
-        if cut.upperBound < s.lowerBound || cut.lowerBound > s.upperBound { out.append(s); continue }
-        if cut.lowerBound > s.lowerBound { out.append(s.lowerBound...cut.lowerBound) }
-        if cut.upperBound < s.upperBound { out.append(cut.upperBound...s.upperBound) }
-    }
-    return out.filter { $0.upperBound - $0.lowerBound > 0.5 }
+    /// gone, too small, hidden behind another window, or out of room.
+    public func relocate(_ perch: Perch, in scene: SceneSnapshot) -> Perch? { map(scene).relocate(perch) }
 }
