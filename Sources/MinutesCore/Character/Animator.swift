@@ -8,6 +8,18 @@ public enum ClockMode: Equatable {
     case spin
 }
 
+/// How she comes and goes.
+public enum PresenceStyle: Equatable {
+    /// Projected in or out along a scan line (teleporting).
+    case beam
+    /// A pirouette that whirls faster and faster until she shrinks into a
+    /// glint and is gone, like the TVA's Miss Minutes (hiding, coming back).
+    case twirl
+
+    var appearDuration: Double { self == .beam ? 0.75 : 0.9 }
+    var vanishDuration: Double { self == .beam ? 0.45 : 1.0 }
+}
+
 /// Layers every animation source into one `Pose` per frame:
 ///
 /// 1. base motion (posture/locomotion, cross-faded on change)
@@ -65,7 +77,7 @@ public final class Animator {
     private var bounce = Spring(stiffness: 260, dampingRatio: 0.28)
 
     public var hologram = true
-    private var presence: (appearing: Bool, start: Double, duration: Double)?
+    private var presence: (appearing: Bool, style: PresenceStyle, start: Double, duration: Double)?
     private var nextFlicker: Double = 9
     private var flickerStart: Double = -10
 
@@ -121,12 +133,23 @@ public final class Animator {
         bounce.velocity -= 3.2 * strength
     }
 
-    public func materialize(at now: Double, duration: Double = 0.75) {
-        presence = (true, now, duration)
+    public func materialize(at now: Double, style: PresenceStyle = .beam, duration: Double? = nil) {
+        setPresence(appearing: true, style: style, at: now, duration: duration ?? style.appearDuration)
     }
 
-    public func dematerialize(at now: Double, duration: Double = 0.45) {
-        presence = (false, now, duration)
+    public func dematerialize(at now: Double, style: PresenceStyle = .beam, duration: Double? = nil) {
+        setPresence(appearing: false, style: style, at: now, duration: duration ?? style.vanishDuration)
+    }
+
+    /// Each way out is the way in played backwards, so turning round halfway
+    /// (called back while still leaving) picks up from the same picture.
+    private func setPresence(appearing: Bool, style: PresenceStyle, at now: Double, duration: Double) {
+        var start = now
+        if let current = presence, current.style == style, current.appearing != appearing {
+            let done = min(1, (now - current.start) / max(current.duration, 0.001))
+            start = now - (1 - done) * duration
+        }
+        presence = (appearing, style, start, duration)
     }
 
     /// True once a dematerialize has fully finished.
@@ -267,7 +290,12 @@ public final class Animator {
 
     private func applyPresence(to pose: inout Pose, now: Double) {
         pose.glow = hologram ? 1 : 0
-        if let presence {
+        if let presence, presence.style == .twirl {
+            let u = CGFloat((now - presence.start) / max(presence.duration, 0.001))
+            if presence.appearing, u >= 1 { self.presence = nil } else {
+                applyTwirl(to: &pose, gone: presence.appearing ? 1 - u : u)
+            }
+        } else if let presence {
             let u = CGFloat((now - presence.start) / max(presence.duration, 0.001))
             let jitter = CGFloat(noise(now * 40, seed: 7)) * 0.5 + 0.5
             if presence.appearing {
@@ -294,5 +322,52 @@ public final class Animator {
             pose.glitch = max(pose.glitch, 0.3 * b)
             pose.opacity *= 1 - 0.15 * b
         }
+    }
+
+    /// The twirl, `gone` of the way out (0 all there, 1 vanished): a crouch to
+    /// wind up, arms swept overhead and a foot tucked like a ballerina, then a
+    /// spin that speeds up as she rises, shrinks into a glint and is gone.
+    private func applyTwirl(to pose: inout Pose, gone: CGFloat) {
+        let p = Double(clamp(gone, 0, 1))
+        let spin = progress(p, from: 0.14, to: 1)
+        let rise = 26 * smoothstep(spin)
+        let w = smoothstep(progress(p, from: 0.04, to: 0.26))
+        let windUp = bump(progress(p, from: 0, to: 0.2))
+
+        pose.body = lerp(pose.body, CGPoint(x: 0, y: 92 + rise), w)
+        pose.body.y -= 10 * windUp
+        pose.squash += 0.06 * smoothstep(spin) - 0.14 * windUp
+        pose.tilt *= 1 - w
+        pose.facing *= 1 - w
+        pose.shadow *= 1 - w
+        pose.leftHand = lerp(pose.leftHand, CGPoint(x: -20, y: 84), w)
+        pose.rightHand = lerp(pose.rightHand, CGPoint(x: 20, y: 84), w)
+        pose.leftArmBend = lerp(pose.leftArmBend, -16, w)
+        pose.rightArmBend = lerp(pose.rightArmBend, -16, w)
+        pose.leftHandAngle *= 1 - w
+        pose.rightHandAngle *= 1 - w
+        pose.leftFoot = lerp(pose.leftFoot, CGPoint(x: -3, y: rise), w)
+        pose.rightFoot = lerp(pose.rightFoot, CGPoint(x: 12, y: rise + 24), w)
+        pose.leftLegBend = lerp(pose.leftLegBend, 0, w)
+        pose.rightLegBend = lerp(pose.rightLegBend, 12, w)
+        if w > 0.5 {
+            pose.leftHandShape = .open
+            pose.rightHandShape = .open
+            pose.leftArmBehind = false
+            pose.rightArmBehind = false
+        }
+        pose.smile = lerp(pose.smile, 0.85, w)
+        pose.eyeOpen *= 1 - 0.85 * w
+
+        // A whole number of turns, so coming back she ends facing you.
+        let angle = 2 * .pi * 4 * spin * spin
+        pose.twirl = angle
+        pose.faceShift.x += sin(angle) * 1.1
+        pose.whirl = smoothstep((spin - 0.05) / 0.35)
+        pose.glow = max(pose.glow, pose.whirl)
+        pose.size = 1 - Ease.in(progress(p, from: 0.5, to: 0.93))
+        pose.sparkle = bump(progress(p, from: 0.8, to: 1))
+        pose.glitch = max(pose.glitch, 0.35 * bump(progress(p, from: 0.62, to: 0.95)))
+        if p >= 1 { pose.opacity = 0 }
     }
 }

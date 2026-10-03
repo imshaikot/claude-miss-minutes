@@ -74,6 +74,7 @@ public enum GestureName: String, CaseIterable, Codable {
     case lookAround = "look_around"
     case stretch
     case blowKiss = "blow_kiss"
+    case dance
 }
 
 /// Looping arm/face layers that hold while the assistant is in a phase.
@@ -144,6 +145,7 @@ public enum Gestures {
         case .lookAround: return lookAround
         case .stretch: return stretch
         case .blowKiss: return blowKiss
+        case .dance: return dance
         }
     }
 
@@ -312,6 +314,46 @@ public enum Gestures {
         .scalar(\.mouthOpen, [Key(0, 0), Key(0.3, 0.12), Key(0.7, 0.12), Key(0.9, 0)]),
         .scalar(\.smile, [Key(0, 0), Key(0.3, -0.3), Key(0.7, -0.3), Key(0.9, 0.2)], .additive),
     ])
+
+    /// A little Charleston: jazz hands trading high and low, a bounce and a
+    /// kick on every beat, hips swinging the other way.
+    static let dance: Gesture = {
+        let beat = 0.3, start = 0.15, beats = 8
+        var body: [Key<CGPoint>] = [Key(0, .zero)]
+        var left: [Key<CGPoint>] = [Key(0, P(-56, -38))]
+        var right: [Key<CGPoint>] = [Key(0, P(56, -38))]
+        var leftFoot: [Key<CGPoint>] = [Key(0, .zero)]
+        var rightFoot: [Key<CGPoint>] = [Key(0, .zero)]
+        var tilt: [Key<CGFloat>] = [Key(0, 0)]
+        var face: [Key<CGPoint>] = [Key(0, .zero)]
+        for i in 0..<beats {
+            let t = start + Double(i) * beat
+            let even = i % 2 == 0
+            body.append(Key(t, P(0, -7), .out))
+            body.append(Key(t + beat / 2, P(0, 5)))
+            left.append(Key(t, even ? P(-66, 30) : P(-62, -24), .backOut))
+            right.append(Key(t, even ? P(62, -24) : P(66, 30), .backOut))
+            leftFoot.append(Key(t, even ? P(-12, 12) : .zero, .out))
+            rightFoot.append(Key(t, even ? .zero : P(12, 12), .out))
+            tilt.append(Key(t, even ? 0.1 : -0.1))
+            face.append(Key(t, even ? P(-0.3, 0.1) : P(0.3, 0.1)))
+        }
+        let end = start + Double(beats) * beat
+        body.append(Key(end, .zero)); leftFoot.append(Key(end, .zero)); rightFoot.append(Key(end, .zero))
+        tilt.append(Key(end, 0)); face.append(Key(end, .zero))
+        return Gesture("dance", duration: end + 0.2, fadeIn: 0.12, mood: .excited, tracks: [
+            .point(\.body, body, .additive),
+            .point(\.leftHand, left), .point(\.rightHand, right),
+            .scalar(\.leftArmBend, [Key(0, 8), Key(start, -4)]),
+            .scalar(\.rightArmBend, [Key(0, 8), Key(start, -4)]),
+            .oscillate(\.leftHandAngle, amplitude: 0.35, hertz: 6),
+            .oscillate(\.rightHandAngle, amplitude: 0.35, hertz: 6),
+            .shape(\.leftHandShape, .open), .shape(\.rightHandShape, .open),
+            .point(\.leftFoot, leftFoot, .additive), .point(\.rightFoot, rightFoot, .additive),
+            .scalar(\.tilt, tilt, .additive),
+            .point(\.faceShift, face, .additive),
+        ])
+    }()
 
     // MARK: Activity loops (first key == last key so they cycle seamlessly)
 

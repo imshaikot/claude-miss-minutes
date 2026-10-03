@@ -13,26 +13,39 @@ public struct CharacterRenderer {
     ///   - scale: character scale (1 = model sheet size).
     ///   - deviceScale: backing scale factor; shadows are specified in device space.
     public func draw(_ pose: Pose, in ctx: CGContext, anchor: CGPoint, scale: CGFloat, deviceScale: CGFloat = 2, time: Double = 0) {
-        guard pose.opacity > 0.002 else { return }
+        let drawn = pose.opacity > 0.002 && pose.size > 0.01
+        guard drawn || pose.sparkle > 0.01 else { return }
         ctx.saveGState()
         ctx.translateBy(x: anchor.x, y: anchor.y)
         ctx.scaleBy(x: scale, y: scale)
         let shadowScale = scale * deviceScale
 
-        if pose.glitch > 0.02 {
-            drawGlitched(pose, ctx, shadowScale: shadowScale, time: time)
-        } else {
-            ctx.setAlpha(pose.opacity)
-            ctx.beginTransparencyLayer(auxiliaryInfo: nil)
-            drawRevealed(pose, ctx, shadowScale: shadowScale, time: time)
-            ctx.endTransparencyLayer()
+        if drawn {
+            ctx.saveGState()
+            ctx.concatenate(sizeTransform(pose))
+            if pose.whirl > 0.01 { drawWhirl(pose, ctx, shadowScale: shadowScale, front: false) }
+            ctx.saveGState()
+            ctx.concatenate(turnTransform(pose))
+            if pose.glitch > 0.02 {
+                drawGlitched(pose, ctx, shadowScale: shadowScale, time: time)
+            } else {
+                ctx.setAlpha(pose.opacity)
+                ctx.beginTransparencyLayer(auxiliaryInfo: nil)
+                drawRevealed(pose, ctx, shadowScale: shadowScale, time: time)
+                ctx.endTransparencyLayer()
+            }
+            ctx.restoreGState()
+            if pose.whirl > 0.01 { drawWhirl(pose, ctx, shadowScale: shadowScale, front: true) }
+            ctx.restoreGState()
         }
+        if pose.sparkle > 0.01 { drawSparkle(pose, ctx, shadowScale: shadowScale) }
         ctx.restoreGState()
     }
 
     /// The clickable silhouette in the same space `draw` uses.
     public func hitPath(for pose: Pose, anchor: CGPoint, scale: CGFloat) -> CGPath {
-        let place = CGAffineTransform(translationX: anchor.x, y: anchor.y).scaledBy(x: scale, y: scale)
+        let place = turnTransform(pose).concatenating(sizeTransform(pose))
+            .concatenating(CGAffineTransform(translationX: anchor.x, y: anchor.y).scaledBy(x: scale, y: scale))
         let path = CGMutablePath()
         let bodyT = bodyTransform(pose)
         path.addEllipse(in: CGRect(x: -Rig.body.width - 6, y: -Rig.body.height - 6, width: (Rig.body.width + 6) * 2, height: (Rig.body.height + 14) * 2), transform: bodyT.concatenating(place))
@@ -48,6 +61,74 @@ public struct CharacterRenderer {
     }
 
     // MARK: - Presence effects
+
+    /// Shrinking into a point, about the body centre.
+    func sizeTransform(_ pose: Pose) -> CGAffineTransform {
+        guard pose.size != 1 else { return .identity }
+        return CGAffineTransform(translationX: pose.body.x, y: pose.body.y)
+            .scaledBy(x: pose.size, y: pose.size)
+            .translatedBy(x: -pose.body.x, y: -pose.body.y)
+    }
+
+    /// Turning about her vertical axis: squeezed by the cosine, and mirrored
+    /// past a quarter turn, when it is her back we see.
+    func turnTransform(_ pose: Pose) -> CGAffineTransform {
+        guard pose.twirl != 0 else { return .identity }
+        let c = cos(pose.twirl)
+        let squeeze = c < 0 ? min(c, -0.05) : max(c, 0.05)
+        return CGAffineTransform(translationX: pose.body.x, y: 0).scaledBy(x: squeeze, y: 1).translatedBy(x: -pose.body.x, y: 0)
+    }
+
+    /// Rings of light whirling round her as she spins, drawn in two passes:
+    /// the far half behind her, the near half in front.
+    private func drawWhirl(_ pose: Pose, _ ctx: CGContext, shadowScale: CGFloat, front: Bool) {
+        let rings: [(dy: CGFloat, rx: CGFloat)] = [(34, 66), (-6, 76), (-48, 54)]
+        let path = CGMutablePath()
+        for (i, ring) in rings.enumerated() {
+            let center = CGPoint(x: pose.body.x, y: pose.body.y + ring.dy)
+            let start = pose.twirl * 0.6 + CGFloat(i) * 2.1
+            var drawing = false
+            for k in 0...24 {
+                let a = start + 2.4 * CGFloat(k) / 24
+                let point = CGPoint(x: center.x + ring.rx * cos(a), y: center.y + 12 * sin(a))
+                // The lower half of each ring is the side nearer to us.
+                guard (sin(a) < 0) == front else { drawing = false; continue }
+                if drawing { path.addLine(to: point) } else { path.move(to: point) }
+                drawing = true
+            }
+        }
+        ctx.saveGState()
+        ctx.setShadow(offset: .zero, blur: 6 * shadowScale, color: Palette.glow)
+        ctx.setStrokeColor(Palette.scan.copy(alpha: pose.whirl * (front ? 0.85 : 0.4)) ?? Palette.scan)
+        ctx.setLineWidth(3)
+        ctx.setLineCap(.round)
+        ctx.addPath(path)
+        ctx.strokePath()
+        ctx.restoreGState()
+    }
+
+    /// The glint she shrinks into when she goes, and grows out of when she comes back.
+    private func drawSparkle(_ pose: Pose, _ ctx: CGContext, shadowScale: CGFloat) {
+        let s = pose.sparkle
+        let r = 38 * s
+        let star = CGMutablePath()
+        for k in 0..<16 {
+            let a = CGFloat(k) * .pi / 8
+            let reach = k % 4 == 0 ? r : k % 2 == 0 ? r * 0.4 : r * 0.1
+            let point = CGPoint(x: sin(a) * reach, y: cos(a) * reach)
+            if k == 0 { star.move(to: point) } else { star.addLine(to: point) }
+        }
+        star.closeSubpath()
+        ctx.saveGState()
+        ctx.translateBy(x: pose.body.x, y: pose.body.y)
+        ctx.rotate(by: s * .pi / 4)
+        ctx.setShadow(offset: .zero, blur: 14 * shadowScale, color: Palette.glow)
+        ctx.setFillColor(Palette.scan.copy(alpha: min(1, s * 1.5)) ?? Palette.scan)
+        ctx.addPath(star)
+        ctx.fillPath()
+        ctx.fillEllipse(in: CGRect(x: -r * 0.2, y: -r * 0.2, width: r * 0.4, height: r * 0.4))
+        ctx.restoreGState()
+    }
 
     private func drawRevealed(_ pose: Pose, _ ctx: CGContext, shadowScale: CGFloat, time: Double) {
         guard pose.reveal < 0.999 else {
@@ -131,18 +212,21 @@ public struct CharacterRenderer {
             drawShoe(at: foot, direction: dir, angle: side < 0 ? pose.leftFootAngle : pose.rightFootAngle, ctx)
         }
 
+        // Arms and gloves: in front of the body, unless one is reaching round behind her.
+        let behind = { (side: CGFloat) in side < 0 ? pose.leftArmBehind : pose.rightArmBehind }
+        for side: CGFloat in [-1, 1] where behind(side) { drawArm(pose, side: side, bodyT, limbT, ctx) }
         drawBody(pose, bodyT, ctx, shadowScale: shadowScale, time: time)
+        for side: CGFloat in [-1, 1] where !behind(side) { drawArm(pose, side: side, bodyT, limbT, ctx) }
+    }
 
-        // Arms and gloves, in front.
-        for side: CGFloat in [-1, 1] {
-            let shoulder = CGPoint(x: side * Rig.shoulder.x, y: Rig.shoulder.y).applying(bodyT)
-            let hand = (side < 0 ? pose.leftHand : pose.rightHand).applying(limbT)
-            let bend = side < 0 ? pose.leftArmBend : pose.rightArmBend
-            let control = strokeHose(from: shoulder, to: hand, bend: bend, side: side, ctx)
-            let tangent = hand - control
-            let angle = atan2(tangent.y, tangent.x) - side * (side < 0 ? pose.leftHandAngle : pose.rightHandAngle)
-            drawGlove(at: hand, angle: angle, mirrored: side < 0, shape: side < 0 ? pose.leftHandShape : pose.rightHandShape, ctx)
-        }
+    private func drawArm(_ pose: Pose, side: CGFloat, _ bodyT: CGAffineTransform, _ limbT: CGAffineTransform, _ ctx: CGContext) {
+        let shoulder = CGPoint(x: side * Rig.shoulder.x, y: Rig.shoulder.y).applying(bodyT)
+        let hand = (side < 0 ? pose.leftHand : pose.rightHand).applying(limbT)
+        let bend = side < 0 ? pose.leftArmBend : pose.rightArmBend
+        let control = strokeHose(from: shoulder, to: hand, bend: bend, side: side, ctx)
+        let tangent = hand - control
+        let angle = atan2(tangent.y, tangent.x) - side * (side < 0 ? pose.leftHandAngle : pose.rightHandAngle)
+        drawGlove(at: hand, angle: angle, mirrored: side < 0, shape: side < 0 ? pose.leftHandShape : pose.rightHandShape, ctx)
     }
 
     private func drawGroundShadow(_ pose: Pose, _ ctx: CGContext) {
@@ -206,15 +290,19 @@ public struct CharacterRenderer {
         ctx.fillEllipse(in: outer)
         ctx.restoreGState()
 
-        // Dial.
+        // Dial, or the back of the case once she has turned round.
         ctx.saveGState()
         ctx.addEllipse(in: inner)
         ctx.clip()
-        let gradient = CGGradient(colorsSpace: CGColorSpace(name: CGColorSpace.sRGB), colors: [Palette.faceLight, Palette.faceDark] as CFArray, locations: [0, 1])!
-        ctx.drawRadialGradient(gradient, startCenter: CGPoint(x: -14, y: 20), startRadius: 2,
-                               endCenter: CGPoint(x: 0, y: 0), endRadius: rx * 1.05, options: [.drawsAfterEndLocation])
-        drawTicks(ctx, inner: inner)
-        drawFace(pose, ctx)
+        if cos(pose.twirl) < 0 {
+            drawCaseBack(ctx, inner: inner)
+        } else {
+            let gradient = CGGradient(colorsSpace: CGColorSpace(name: CGColorSpace.sRGB), colors: [Palette.faceLight, Palette.faceDark] as CFArray, locations: [0, 1])!
+            ctx.drawRadialGradient(gradient, startCenter: CGPoint(x: -14, y: 20), startRadius: 2,
+                                   endCenter: CGPoint(x: 0, y: 0), endRadius: rx * 1.05, options: [.drawsAfterEndLocation])
+            drawTicks(ctx, inner: inner)
+            drawFace(pose, ctx)
+        }
         if pose.glow > 0.01 { drawScanlines(ctx, inner: inner, strength: pose.glow, time: time) }
         ctx.restoreGState()
 
@@ -237,6 +325,29 @@ public struct CharacterRenderer {
         ctx.strokeEllipse(in: outer)
 
         ctx.restoreGState()
+    }
+
+    /// The back of the case, glimpsed mid-twirl: a cover plate with a coin slot, screwed on.
+    private func drawCaseBack(_ ctx: CGContext, inner: CGRect) {
+        let gradient = CGGradient(colorsSpace: CGColorSpace(name: CGColorSpace.sRGB), colors: [Palette.faceDark, Palette.bezel] as CFArray, locations: [0, 1])!
+        ctx.drawRadialGradient(gradient, startCenter: CGPoint(x: 12, y: 18), startRadius: 2,
+                               endCenter: .zero, endRadius: inner.width * 0.55, options: [.drawsAfterEndLocation])
+        let plate = CGRect(x: -20, y: -20, width: 40, height: 40)
+        ctx.setFillColor(Palette.knob)
+        ctx.fillEllipse(in: plate)
+        ctx.setStrokeColor(Palette.outline.copy(alpha: 0.55) ?? Palette.outline)
+        ctx.setLineWidth(1.6)
+        ctx.strokeEllipse(in: plate)
+        ctx.setLineWidth(2.2)
+        ctx.setLineCap(.round)
+        ctx.move(to: CGPoint(x: -8, y: -4.6))
+        ctx.addLine(to: CGPoint(x: 8, y: 4.6))
+        ctx.strokePath()
+        ctx.setFillColor(Palette.outline.copy(alpha: 0.5) ?? Palette.outline)
+        for k in 0..<4 {
+            let a = CGFloat(k) * .pi / 2 + .pi / 4
+            ctx.fillEllipse(in: CGRect(x: cos(a) * 31 - 2, y: sin(a) * 29 - 2, width: 4, height: 4))
+        }
     }
 
     private func drawTicks(_ ctx: CGContext, inner: CGRect) {

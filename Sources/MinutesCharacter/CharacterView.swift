@@ -98,8 +98,9 @@ public enum CharacterSnapshot {
         return ctx.makeImage()
     }
 
-    /// A labelled grid of poses on a checkerboard (so transparency is visible).
-    public static func sheet(_ poses: [(String, Pose)], columns: Int, cell: CGSize = CGSize(width: 260, height: 300), scale: CGFloat = 0.9) -> CGImage? {
+    /// A labelled grid of poses on a checkerboard (so transparency is visible),
+    /// each over a faint drawing of what she is touching.
+    public static func sheet(_ poses: [ModelSheet.Entry], columns: Int, cell: CGSize = CGSize(width: 260, height: 300), scale: CGFloat = 0.9) -> CGImage? {
         let rows = (poses.count + columns - 1) / columns
         let size = CGSize(width: cell.width * CGFloat(columns), height: cell.height * CGFloat(rows))
         let px = 2
@@ -118,13 +119,51 @@ public enum CharacterSnapshot {
         for (i, entry) in poses.enumerated() {
             let col = i % columns, row = rows - 1 - i / columns
             let origin = CGPoint(x: CGFloat(col) * cell.width, y: CGFloat(row) * cell.height)
-            renderer.draw(entry.1, in: ctx, anchor: CGPoint(x: origin.x + cell.width / 2, y: origin.y + 95), scale: scale, deviceScale: CGFloat(px))
-            let label = NSAttributedString(string: entry.0, attributes: [.font: NSFont.boldSystemFont(ofSize: 13), .foregroundColor: NSColor.black])
+            let anchor = CGPoint(x: origin.x + cell.width / 2, y: origin.y + 95)
+            ctx.saveGState()
+            ctx.clip(to: CGRect(origin: origin, size: cell))
+            drawProp(entry.prop, anchor: anchor, scale: scale, in: ctx)
+            ctx.restoreGState()
+            renderer.draw(entry.pose, in: ctx, anchor: anchor, scale: scale, deviceScale: CGFloat(px))
+            let label = NSAttributedString(string: entry.name, attributes: [.font: NSFont.boldSystemFont(ofSize: 13), .foregroundColor: NSColor.black])
             let line = CTLineCreateWithAttributedString(label)
             ctx.textPosition = CGPoint(x: origin.x + 10, y: origin.y + cell.height - 22)
             CTLineDraw(line, ctx)
         }
         return ctx.makeImage()
+    }
+
+    /// A slab of window with its edge outlined, on the side of the edge the prop names.
+    private static func drawProp(_ prop: ModelSheet.Prop, anchor a: CGPoint, scale s: CGFloat, in ctx: CGContext) {
+        let slab: CGRect
+        let edge: (CGPoint, CGPoint)
+        switch prop {
+        case .none:
+            return
+        case .ground:
+            ctx.setStrokeColor(CGColor(gray: 0.45, alpha: 0.6))
+            ctx.setLineWidth(1.5)
+            ctx.move(to: CGPoint(x: a.x - 110, y: a.y)); ctx.addLine(to: CGPoint(x: a.x + 110, y: a.y))
+            ctx.strokePath()
+            return
+        case .windowTop:
+            slab = CGRect(x: a.x - 120, y: a.y - 200, width: 240, height: 200)
+            edge = (CGPoint(x: slab.minX, y: a.y), CGPoint(x: slab.maxX, y: a.y))
+        case let .windowBottom(height):
+            let y = a.y + height * s
+            slab = CGRect(x: a.x - 120, y: y, width: 240, height: 200)
+            edge = (CGPoint(x: slab.minX, y: y), CGPoint(x: slab.maxX, y: y))
+        case let .windowSide(offset):
+            let x = a.x + offset * s
+            slab = offset > 0 ? CGRect(x: x, y: a.y - 40, width: 200, height: 300) : CGRect(x: x - 200, y: a.y - 40, width: 200, height: 300)
+            edge = (CGPoint(x: x, y: slab.minY), CGPoint(x: x, y: slab.maxY))
+        }
+        ctx.setFillColor(CGColor(srgbRed: 0.55, green: 0.62, blue: 0.75, alpha: 0.35))
+        ctx.fill(slab)
+        ctx.setStrokeColor(CGColor(srgbRed: 0.2, green: 0.25, blue: 0.35, alpha: 0.8))
+        ctx.setLineWidth(2)
+        ctx.move(to: edge.0); ctx.addLine(to: edge.1)
+        ctx.strokePath()
     }
 
     public static func writePNG(_ image: CGImage, to url: URL) throws {

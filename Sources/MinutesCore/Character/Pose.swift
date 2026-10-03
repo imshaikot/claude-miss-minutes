@@ -34,6 +34,9 @@ public struct Pose: Equatable {
     public var rightHandAngle: CGFloat = 0
     public var leftHandShape: HandShape = .open
     public var rightHandShape: HandShape = .open
+    /// Drawn behind the body (the far arm when she is side-on: crawling, climbing).
+    public var leftArmBehind = false
+    public var rightArmBehind = false
 
     // Legs (feet in anchor space; bend > 0 bows the knee outward)
     public var leftFoot = CGPoint(x: -15, y: 0)
@@ -67,6 +70,15 @@ public struct Pose: Equatable {
     public var reveal: CGFloat = 1
     public var glow: CGFloat = 1
     public var shadow: CGFloat = 0
+    /// Twirling away or back: turned this far (radians) about her vertical
+    /// axis, the back of the clock showing past a quarter turn.
+    public var twirl: CGFloat = 0
+    /// Her whole figure scaled about the body centre (shrinking into a point).
+    public var size: CGFloat = 1
+    /// The rings whirling round her as she spins, 0…1.
+    public var whirl: CGFloat = 0
+    /// The glint she pops out of (or into), 0…1, drawn at the body centre.
+    public var sparkle: CGFloat = 0
 
     public init() {}
 
@@ -79,6 +91,7 @@ public struct Pose: Equatable {
         \.eyeOpen, \.eyeWide, \.squint, \.browRaise, \.browTilt, \.smile,
         \.mouthOpen, \.mouthWide, \.blush,
         \.opacity, \.glitch, \.reveal, \.glow, \.shadow,
+        \.twirl, \.size, \.whirl, \.sparkle,
     ]
 
     static let pointChannels: [WritableKeyPath<Pose, CGPoint>] = [
@@ -98,6 +111,8 @@ public struct Pose: Equatable {
         for key in pointChannels { out[keyPath: key] = lerp(a[keyPath: key], b[keyPath: key], t) }
         for key in shapeChannels { out[keyPath: key] = t < 0.5 ? a[keyPath: key] : b[keyPath: key] }
         out.pupilStyle = t < 0.5 ? a.pupilStyle : b.pupilStyle
+        out.leftArmBehind = t < 0.5 ? a.leftArmBehind : b.leftArmBehind
+        out.rightArmBehind = t < 0.5 ? a.rightArmBehind : b.rightArmBehind
         return out
     }
 
@@ -109,6 +124,7 @@ public struct Pose: Equatable {
         leftArmBend = source.leftArmBend; rightArmBend = source.rightArmBend
         leftHandAngle = source.leftHandAngle; rightHandAngle = source.rightHandAngle
         leftHandShape = source.leftHandShape; rightHandShape = source.rightHandShape
+        leftArmBehind = source.leftArmBehind; rightArmBehind = source.rightArmBehind
         leftFoot = source.leftFoot; rightFoot = source.rightFoot
         leftLegBend = source.leftLegBend; rightLegBend = source.rightLegBend
         leftFootAngle = source.leftFootAngle; rightFootAngle = source.rightFootAngle

@@ -121,6 +121,39 @@ struct AnimatorTests {
         #expect(pose.opacity < 0.05)
     }
 
+    @Test func sheTwirlsIntoAGlintAndBackOutFacingYou() {
+        let animator = Animator(random: { 0.5 })
+        animator.dematerialize(at: 0, style: .twirl)
+        let spinning = run(animator, to: 0.6)
+        #expect(spinning.whirl > 0.9)
+        #expect(spinning.size > 0.5)
+        let glint = run(animator, from: 0.6, to: 0.9)
+        #expect(glint.size < 0.4)
+        #expect(glint.sparkle > 0.5)
+        _ = run(animator, from: 0.9, to: 1.05)
+        #expect(animator.isDematerialized)
+
+        animator.materialize(at: 2, style: .twirl)
+        let back = run(animator, from: 2, to: 3)
+        #expect(back.size == 1)
+        #expect(back.whirl == 0)
+        #expect(cos(back.twirl) == 1)
+    }
+
+    @Test func calledBackMidTwirlSheTurnsRoundSmoothly() {
+        let animator = Animator(random: { 0.5 })
+        animator.dematerialize(at: 0, style: .twirl)
+        _ = run(animator, to: 0.7)
+        let leaving = animator.update(now: 0.75, dt: 1.0 / 60)
+        #expect(leaving.size < 0.9)
+        animator.materialize(at: 0.75, style: .twirl)
+        let returning = animator.update(now: 0.75, dt: 1.0 / 60)
+        #expect(abs(returning.size - leaving.size) < 0.01)
+        let grown = run(animator, from: 0.76, to: 1.8)
+        #expect(grown.size == 1)
+        #expect(!animator.isDematerialized)
+    }
+
     @Test func lipSyncOpensTheMouth() {
         let animator = Animator(random: { 0.5 })
         animator.mouth = MouthShape(open: 0.8, wide: -0.8)
@@ -141,6 +174,69 @@ struct AnimatorTests {
         let walked = 0.1 * 2 * Motions.stride
         #expect(abs((a.leftFoot.x - b.leftFoot.x) - walked) < 0.001)
         #expect(a.leftFoot.y == 0 && b.leftFoot.y == 0)
+    }
+
+    /// Where a hand is on screen relative to the anchor (hands are posed in body space).
+    private func anchored(_ hand: CGPoint, _ pose: Pose) -> CGPoint { pose.body + hand.rotated(by: pose.tilt) }
+
+    @Test func crawlingHandsStayPlanted() {
+        var c = MotionContext()
+        c.facing = 1
+        c.walkPhase = 0.05
+        let a = Motions.pose(.crawl, c)
+        c.walkPhase = 0.15
+        let b = Motions.pose(.crawl, c)
+        let crawled = 0.1 * 2 * Motions.stride(for: .crawl)
+        #expect(abs((anchored(a.rightHand, a).x - anchored(b.rightHand, b).x) - crawled) < 0.001)
+        #expect(abs(anchored(a.rightHand, a).y - anchored(b.rightHand, b).y) < 0.001)
+    }
+
+    @Test func climbingHandsStayPlanted() {
+        var c = MotionContext()
+        c.facing = -1
+        c.climb = 1
+        c.walkPhase = 0.05
+        let a = Motions.pose(.climb, c)
+        c.walkPhase = 0.15
+        let b = Motions.pose(.climb, c)
+        let climbed = 0.1 * 2 * Motions.stride(for: .climb)
+        // The near hand (her left, facing left) grips the frame while she rises past it.
+        #expect(abs((anchored(a.leftHand, a).y - anchored(b.leftHand, b).y) - climbed) < 0.001)
+        #expect(abs(anchored(a.leftHand, a).x + Motions.clingGrip) < 0.001)
+    }
+
+    @Test func hangingHandsHoldTheEdgeWhileSheSways() {
+        var c = MotionContext()
+        for t in [0.0, 0.7, 1.9, 3.3] {
+            c.time = t
+            let pose = Motions.pose(.hang, c)
+            for (hand, side) in [(pose.leftHand, CGFloat(-1)), (pose.rightHand, 1)] {
+                #expect(abs(anchored(hand, pose).y - Motions.hangGrip) < 0.001)
+                #expect(abs(anchored(hand, pose).x - side * Motions.hangSpread) < 0.001)
+            }
+        }
+        // The perch's edge sits just above her grip.
+        #expect(PerchRules().hangReach > Motions.hangGrip)
+    }
+
+    @Test func clingingHandsHoldTheSide() {
+        var c = MotionContext()
+        c.facing = 1
+        let pose = Motions.pose(.cling, c)
+        #expect(abs(anchored(pose.rightHand, pose).x - Motions.clingGrip) < 0.001)
+        #expect(abs(anchored(pose.leftHand, pose).x - Motions.clingGrip) < 0.001)
+        #expect(pose.leftArmBehind && !pose.rightArmBehind)
+        #expect(PerchRules().clingReach > Motions.clingGrip)
+    }
+
+    @Test func everyBaseMotionHasItsOwnPose() {
+        var c = MotionContext()
+        c.time = 0.4
+        c.walkPhase = 0.3
+        let poses = BaseMotion.allCases.map { Motions.pose($0, c) }
+        for (i, a) in poses.enumerated() {
+            for (j, b) in poses.enumerated() where j > i { #expect(a != b, "\(BaseMotion.allCases[i]) looks like \(BaseMotion.allCases[j])") }
+        }
     }
 }
 
