@@ -1,13 +1,16 @@
 import CoreGraphics
 import Foundation
 
-/// Idle fidgets per posture, as data: (gesture, weight).
+/// Idle fidgets per posture, as data: (gesture, weight). Hanging and clinging
+/// she keeps at least one hand on the edge.
 public enum IdleFidgets {
     public static func table(for posture: Posture) -> [(GestureName, Double)] {
         switch posture {
-        case .stand: return [(.lookAround, 3), (.tapFoot, 1), (.stretch, 1), (.nod, 0.5)]
-        case .sit: return [(.lookAround, 3), (.stretch, 1), (.nod, 0.6)]
-        case .float: return [(.lookAround, 3), (.stretch, 0.8), (.blowKiss, 0.3)]
+        case .stand: return [(.lookAround, 3), (.tapFoot, 1), (.stretch, 1), (.dance, 0.8), (.nod, 0.5)]
+        case .sit: return [(.lookAround, 3), (.stretch, 1), (.nod, 0.6), (.wave, 0.4)]
+        case .float: return [(.lookAround, 3), (.stretch, 0.8), (.dance, 0.5), (.blowKiss, 0.3)]
+        case .hang: return [(.lookAround, 3), (.nod, 0.6), (.blowKiss, 0.4)]
+        case .cling: return [(.lookAround, 3), (.nod, 0.8)]
         }
     }
 
@@ -22,14 +25,60 @@ public enum IdleFidgets {
     }
 }
 
+/// What she does with herself between conversations, as data.
+public enum IdleLife {
+    public enum Beat: Equatable {
+        case fidget(GestureName)
+        /// A short way along whatever she is on: steps, a crawl, a climb, a shimmy.
+        case stroll
+    }
+
+    /// A small beat: about a third are strolls when she may roam.
+    public static func beat(posture: Posture, roaming: Bool, roll: Double) -> Beat {
+        let strolls = 0.35
+        guard roaming else { return .fidget(IdleFidgets.pick(for: posture, roll: roll)) }
+        if roll < strolls { return .stroll }
+        return .fidget(IdleFidgets.pick(for: posture, roll: (roll - strolls) / (1 - strolls)))
+    }
+
+    /// A bigger move: usually somewhere else on the app you are working in
+    /// (its top, its sides, under it), otherwise anywhere.
+    public static func wander(frontApp: String?, roll: Double) -> MoveTarget {
+        frontApp != nil && roll < 0.6 ? .explore(app: frontApp) : .random
+    }
+}
+
 /// The behaviour layer: turns brain, voice, stage and bubble events into what
 /// she does next. It owns the conversation phase and the idle life (wandering,
 /// fidgets, reminders) and talks to everything else through ports only.
 @MainActor
 public final class Director {
     public enum Phase: Equatable {
-        case idle, listening, thinking, speaking, asking
+        /// `listening`: her input bubble is open for typing. `hearing`: ⌃ is held and she is taking dictation.
+        case idle, listening, hearing, thinking, speaking, asking
     }
+
+    /// Her ears while a permission question stands.
+    private enum AnswerEars: Equatable {
+        case closed
+        /// Hands-free: they open once she has finished asking.
+        case afterVoice
+        /// `held`: while ⌃ is down; otherwise hands-free, for `answerWindow`.
+        case open(held: Bool)
+
+        var isOpen: Bool {
+            if case .open = self { return true }
+            return false
+        }
+    }
+
+    /// Hands-free, how long her ears stay open after she asks, and how long a
+    /// clear yes or no must stand before she acts on it ("no… problem!").
+    static let answerWindow: TimeInterval = 8
+    static let answerSettle: TimeInterval = 0.8
+    /// How long a click on her waits for a second one before it opens her
+    /// bubble, so a double-click doesn't flash it open first.
+    static let doubleClickWait: TimeInterval = 0.25
 
     public private(set) var phase: Phase = .idle {
         didSet { if phase != oldValue { onPhaseChange?(phase) } }
@@ -44,6 +93,7 @@ public final class Director {
     private let bubble: BubblePort
     private let voice: VoicePort
     private let brain: BrainPort
+    private let ears: EarsPort?
     private let screenshots: ScreenshotPort?
     private let scheduler: Scheduler
     private let settings: () -> MinutesSettings
@@ -54,20 +104,27 @@ public final class Director {
     private var sentences = SentenceStream()
     private var turnDone = true
     private var pendingPermission: PermissionRequest?
+    private var answerEars = AnswerEars.closed
+    private var answerHeard = ""
+    private var answerSettle: ScheduledTask?
+    private var answerWindow: ScheduledTask?
     private var wanderTask: ScheduledTask?
-    private var fidgetTask: ScheduledTask?
+    private var idleTask: ScheduledTask?
     private var moodTask: ScheduledTask?
+    private var clickTask: ScheduledTask?
     private var reminders: [UUID: ScheduledTask] = [:]
     private var hiddenForShyApp = false
+    private var hearingPrompt = ""
 
     public init(character: CharacterPort, stage: StagePort, bubble: BubblePort, voice: VoicePort, brain: BrainPort,
-                screenshots: ScreenshotPort?, scheduler: Scheduler, settings: @escaping () -> MinutesSettings,
+                ears: EarsPort? = nil, screenshots: ScreenshotPort?, scheduler: Scheduler, settings: @escaping () -> MinutesSettings,
                 now: @escaping () -> Date = Date.init, random: @escaping () -> Double = { Double.random(in: 0..<1) }) {
         self.character = character
         self.stage = stage
         self.bubble = bubble
         self.voice = voice
         self.brain = brain
+        self.ears = ears
         self.screenshots = screenshots
         self.scheduler = scheduler
         self.settings = settings
@@ -78,6 +135,7 @@ public final class Director {
         bubble.onEvent = { [weak self] in self?.handle(bubble: $0) }
         brain.onEvent = { [weak self] in self?.handle(brain: $0) }
         voice.onFinished = { [weak self] in self?.voiceFinished() }
+        ears?.onEvent = { [weak self] in self?.handle(ears: $0) }
     }
 
     // MARK: Lifecycle
@@ -93,7 +151,7 @@ public final class Director {
             self.say(greeting)
         }
         scheduleWander()
-        scheduleFidget()
+        scheduleIdle()
     }
 
     /// Hotkey, menu item or a click on her: open the input bubble.
@@ -101,7 +159,7 @@ public final class Director {
         if !stage.isVisible { stage.appear() }
         switch phase {
         case .asking:
-            if let pendingPermission { bubble.showPermission(pendingPermission) }
+            showPermission()
         case .thinking:
             bubble.showThinking(Lines.pick(Lines.thinking))
         case .speaking:
@@ -109,14 +167,23 @@ public final class Director {
             listen()
         case .idle, .listening:
             listen()
+        case .hearing:
+            break
         }
     }
 
     public func stopTalking() {
+        if phase == .hearing {
+            ears?.cancel()
+            phase = .idle
+            character.setActivity(nil)
+            bubble.hide(after: 0)
+        }
         brain.interrupt()
         voice.stop()
         sentences = SentenceStream()
         turnDone = true
+        closeAnswerEars()
         pendingPermission = nil
         if phase != .idle && phase != .listening { finishTurn(hideAfter: 4) }
     }
@@ -130,7 +197,18 @@ public final class Director {
     }
 
     public func toggleVisibility() {
-        if stage.isVisible { stage.vanish() } else { stage.appear() }
+        if stage.isVisible { hide() } else { stage.appear() }
+    }
+
+    /// Double-click or the menu: she drops whatever she was doing and twirls
+    /// out of sight until she is called back (hold ⌃, ⌃⌥M, the menu).
+    public func hide() {
+        clickTask?.cancel()
+        stopTalking()
+        if phase == .listening { handle(bubble: .dismissed) }
+        bubble.hide(after: 0)
+        hiddenForShyApp = false
+        stage.vanish()
     }
 
     public func frontAppChanged(_ app: String?) {
@@ -142,11 +220,11 @@ public final class Director {
         } else if !isShy, hiddenForShyApp {
             hiddenForShyApp = false
             stage.appear()
-        } else if !isShy, let app, phase == .idle, settings().character.wander, random() < 0.2 {
-            // Sometimes she follows you to the app you just switched to.
+        } else if !isShy, let app, phase == .idle, settings().character.wander, random() < 0.45 {
+            // Often she follows you to the app you just switched to, onto whichever of its edges is free.
             scheduler.after(1.5) { [weak self] in
                 guard let self, self.phase == .idle, !self.stage.isTravelling else { return }
-                self.stage.move(to: .app(app), style: .auto) { _ in }
+                self.stage.move(to: .explore(app: app), style: .auto) { _ in }
             }
         }
     }
@@ -166,6 +244,11 @@ public final class Director {
 
     /// Ask her something directly (URL scheme, Shortcuts, tests).
     public func ask(_ text: String) {
+        ask(text, status: Lines.pick(Lines.thinking))
+    }
+
+    /// `status` shows in the thinking bubble: a stock line, or what she heard you say.
+    private func ask(_ text: String, status: String) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         wanderTask?.cancel()
@@ -175,7 +258,7 @@ public final class Director {
         phase = .thinking
         character.setActivity(.think)
         character.setClock(.spin)
-        bubble.showThinking(Lines.pick(Lines.thinking))
+        bubble.showThinking(status)
         let context = Persona.contextLine(date: now(), frontApp: stage.scene().frontApp)
         brain.send(context + "\n" + trimmed)
     }
@@ -186,6 +269,9 @@ public final class Director {
     }
 
     private func finishTurn(hideAfter: TimeInterval = 12) {
+        // A turn that ended under a question took the question with it.
+        closeAnswerEars()
+        pendingPermission = nil
         phase = .idle
         character.setActivity(nil)
         character.setClock(.time)
@@ -196,6 +282,186 @@ public final class Director {
 
     private func voiceFinished() {
         if turnDone && phase == .speaking { finishTurn() }
+        if phase == .asking, answerEars == .afterVoice { openAnswerEars(held: false) }
+    }
+
+    // MARK: Hold to talk
+
+    /// ⌃ held on its own (see `HoldToTalk`): she listens while it is down (out
+    /// of hiding first, if she was hidden) and takes what she heard as your
+    /// question when it is let go. Holding it while she talks or thinks cuts
+    /// her off, like Esc. Holding it while she asks permission takes a yes or
+    /// a no instead.
+    public func holdToTalk(_ event: HoldToTalk.Event) {
+        let answering = answerEars == .open(held: true)
+        switch event {
+        case .began:
+            startHearing()
+        case .ended:
+            guard phase == .hearing || answering else { return }
+            ears?.finish()
+        case .cancelled:
+            if answering {
+                closeAnswerEars()
+                character.setActivity(.ask)
+                showPermission()
+                return
+            }
+            guard phase == .hearing else { return }
+            ears?.cancel()
+            stopHearing()
+            bubble.hide(after: 0)
+        }
+    }
+
+    private func startHearing() {
+        guard settings().listening.holdToTalk, let ears, phase != .hearing else { return }
+        if phase == .asking {
+            if pendingPermission != nil { openAnswerEars(held: true) }
+            return
+        }
+        if !stage.isVisible { stage.appear() }
+        if phase == .speaking || phase == .thinking {
+            stopTalking()
+        } else if voice.isSpeaking {
+            voice.stop() // she must not hear herself
+        }
+        wanderTask?.cancel()
+        phase = .hearing
+        character.setActivity(.listen)
+        character.setMood(.happy)
+        hearingPrompt = Lines.pick(Lines.hearing)
+        bubble.showHearing("", placeholder: hearingPrompt)
+        ears.start(.dictation)
+    }
+
+    private func stopHearing() {
+        phase = .idle
+        character.setActivity(nil)
+        scheduleWander()
+    }
+
+    func handle(ears event: HearingEvent) {
+        if case let .open(held) = answerEars { return heardAnswer(event, held: held) }
+        guard phase == .hearing else { return }
+        switch event {
+        case let .partial(text):
+            bubble.showHearing(text, placeholder: hearingPrompt)
+        case let .final(text):
+            let heard = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            if heard.isEmpty {
+                stopHearing()
+                character.play(.shrug)
+                bubble.showNotice(Lines.pick(Lines.didntCatch), actions: [], autoHide: 2.5)
+            } else {
+                ask(heard, status: "“\(heard)”")
+            }
+        case let .unavailable(reason):
+            stopHearing()
+            bubble.showNotice(reason, actions: [], autoHide: 12)
+        }
+    }
+
+    // MARK: Answering by voice
+
+    // A permission question takes a spoken yes or no as well as a click: hold
+    // ⌃ and say it, or just say it in the few seconds after she has asked.
+    // Only a clear answer counts (`YesNo`); anything else leaves the buttons.
+
+    /// Hands-free: once she has finished asking, her ears open for a while.
+    /// Never the first time: macOS's own prompt shouldn't pop up mid-question.
+    private func awaitSpokenAnswer() {
+        guard settings().listening.handsFreeAnswers, ears?.isAuthorized == true else { return }
+        answerEars = .afterVoice
+        if !voice.isSpeaking { openAnswerEars(held: false) }
+    }
+
+    private func openAnswerEars(held: Bool) {
+        guard let ears else { return }
+        closeAnswerEars()
+        if voice.isSpeaking { voice.stop() } // she must not hear herself
+        answerEars = .open(held: held)
+        answerHeard = ""
+        if held { character.setActivity(.listen) }
+        showPermission()
+        if !held {
+            answerWindow = scheduler.after(Self.answerWindow) { [weak self] in
+                guard let self, self.answerEars == .open(held: false) else { return }
+                self.ears?.finish()
+            }
+        }
+        ears.start(.yesOrNo)
+    }
+
+    /// Shut her ears without taking an answer.
+    private func closeAnswerEars() {
+        if answerEars.isOpen { ears?.cancel() }
+        answerEars = .closed
+        answerSettle?.cancel()
+        answerSettle = nil
+        answerWindow?.cancel()
+        answerWindow = nil
+    }
+
+    private func heardAnswer(_ event: HearingEvent, held: Bool) {
+        switch event {
+        case let .partial(text):
+            answerHeard = text
+            showPermission()
+            // Held, the answer is whatever was said when ⌃ is let go.
+            guard !held else { return }
+            answerSettle?.cancel()
+            answerSettle = nil
+            if let allow = YesNo.parse(text) {
+                answerSettle = scheduler.after(Self.answerSettle) { [weak self] in self?.answerPermission(allow) }
+            }
+        case let .final(text):
+            answerEars = .closed // they have stopped by themselves
+            closeAnswerEars()
+            if let allow = YesNo.parse(text) { return answerPermission(allow) }
+            character.setActivity(.ask)
+            // Hands-free, the window just closes; held, she asks again.
+            guard held else { return showPermission() }
+            let line = Lines.pick(Lines.yesOrNo)
+            character.play(.shrug)
+            showPermission(note: line)
+            say(line)
+            awaitSpokenAnswer()
+        case let .unavailable(reason):
+            answerEars = .closed
+            closeAnswerEars()
+            character.setActivity(.ask)
+            // Hands-free stays quiet about it: the question is what matters.
+            showPermission(note: held ? reason : nil)
+        }
+    }
+
+    private func answerPermission(_ allow: Bool) {
+        guard let request = pendingPermission else { return }
+        closeAnswerEars()
+        pendingPermission = nil
+        brain.answer(request, allow: allow)
+        phase = .thinking
+        character.setActivity(.think)
+        character.setClock(.spin)
+        character.play(allow ? .nod : .shakeHead)
+        bubble.showThinking(allow ? "On it…" : "Alright, I won't.")
+    }
+
+    /// The permission bubble, with what she has heard of your answer and how to
+    /// answer out loud (or `note`, when there is something else to say).
+    private func showPermission(note: String? = nil) {
+        guard let pendingPermission else { return }
+        var voice = PermissionVoice()
+        switch answerEars {
+        case let .open(held):
+            voice.heard = answerHeard
+            if held { voice.note = "Let go of ⌃ to answer" }
+        case .closed, .afterVoice:
+            if settings().listening.holdToTalk, ears != nil { voice.note = "Or hold ⌃ and say yes or no" }
+        }
+        if let note { voice.note = note }
+        bubble.showPermission(pendingPermission, voice: voice)
     }
 
     // MARK: Event handlers
@@ -205,22 +471,19 @@ public final class Director {
         case let .submitted(text):
             ask(text)
         case let .permissionAnswered(allow):
-            guard let request = pendingPermission else { return }
-            pendingPermission = nil
-            brain.answer(request, allow: allow)
-            phase = .thinking
-            character.setActivity(.think)
-            character.setClock(.spin)
-            character.play(allow ? .nod : .shakeHead)
-            bubble.showThinking(allow ? "On it…" : "Alright, I won't.")
+            answerPermission(allow)
         case let .action(name):
             switch name {
             case "Open Settings": onOpenSettings?()
             case "Thanks!": character.play(.blowKiss); bubble.hide(after: 0.6)
-            default: bubble.hide(after: 0)
+            default:
+                // Closed: no listening for an answer behind a hidden bubble.
+                closeAnswerEars()
+                bubble.hide(after: 0)
             }
         case .dismissed:
-            if phase == .listening {
+            if phase == .hearing { ears?.cancel() }
+            if phase == .listening || phase == .hearing {
                 phase = .idle
                 character.setActivity(nil)
             }
@@ -234,7 +497,7 @@ public final class Director {
         case .started:
             break
         case let .textDelta(delta):
-            guard phase != .idle, phase != .listening else { return }
+            guard phase != .idle, phase != .listening, phase != .hearing else { return }
             if phase != .speaking {
                 phase = .speaking
                 character.setActivity(.talk)
@@ -258,12 +521,16 @@ public final class Director {
         case .toolFinished:
             break
         case let .permissionRequested(request):
+            // Asked by a turn you just talked over: that turn is gone.
+            guard phase != .hearing else { brain.answer(request, allow: false); return }
+            closeAnswerEars()
             pendingPermission = request
             phase = .asking
             character.setActivity(.ask)
             character.setClock(.time)
-            bubble.showPermission(request)
+            showPermission()
             say("Mind if I \(request.tool == "Bash" ? "run a command" : "use \(request.tool)")?")
+            awaitSpokenAnswer()
         case let .turnFinished(result):
             guard !turnDone else { return }
             turnDone = true
@@ -304,12 +571,18 @@ public final class Director {
     func handle(stage event: StageEvent) {
         switch event {
         case .clicked:
-            if phase == .listening, bubble.isOpen {
-                bubble.hide(after: 0)
-                handle(bubble: .dismissed)
-            } else {
-                summon()
+            clickTask?.cancel()
+            clickTask = scheduler.after(Self.doubleClickWait) { [weak self] in
+                guard let self else { return }
+                if self.phase == .listening, self.bubble.isOpen {
+                    self.bubble.hide(after: 0)
+                    self.handle(bubble: .dismissed)
+                } else {
+                    self.summon()
+                }
             }
+        case .doubleClicked:
+            hide()
         case .dragStarted:
             wanderTask?.cancel()
         case .dropped:
@@ -373,6 +646,11 @@ public final class Director {
     public var pendingReminderCount: Int { reminders.count }
 
     private func reminderFired(_ message: String) {
+        // Not while she is listening to you: she would hear herself.
+        guard phase != .hearing, !answerEars.isOpen else {
+            scheduler.after(5) { [weak self] in self?.reminderFired(message) }
+            return
+        }
         if !stage.isVisible { stage.appear() }
         onAlert?()
         stage.move(to: .cursor, style: .teleport) { [weak self] _ in
@@ -395,21 +673,28 @@ public final class Director {
         wanderTask = scheduler.after(delay) { [weak self] in
             guard let self else { return }
             if self.phase == .idle, self.stage.isVisible, !self.stage.isTravelling, !self.bubble.isOpen {
-                self.stage.move(to: .random, style: .auto) { _ in }
+                let target = IdleLife.wander(frontApp: self.stage.scene().frontApp, roll: self.random())
+                self.stage.move(to: target, style: .auto) { _ in }
             }
             self.scheduleWander()
         }
     }
 
-    private func scheduleFidget() {
-        fidgetTask?.cancel()
-        fidgetTask = scheduler.after(12 + random() * 20) { [weak self] in
+    /// Small beats between the big moves, so she is never still for long.
+    private func scheduleIdle() {
+        idleTask?.cancel()
+        let range = settings().character.idleInterval
+        idleTask = scheduler.after(range.lowerBound + random() * (range.upperBound - range.lowerBound)) { [weak self] in
             guard let self else { return }
             if self.phase == .idle, self.stage.isVisible, !self.stage.isTravelling {
                 let posture = self.stage.currentPerch?.posture ?? .stand
-                self.character.play(IdleFidgets.pick(for: posture, roll: self.random()))
+                let roaming = self.settings().character.wander && !self.bubble.isOpen
+                switch IdleLife.beat(posture: posture, roaming: roaming, roll: self.random()) {
+                case let .fidget(gesture): self.character.play(gesture)
+                case .stroll: self.stage.move(to: .stroll, style: .auto) { _ in }
+                }
             }
-            self.scheduleFidget()
+            self.scheduleIdle()
         }
     }
 }

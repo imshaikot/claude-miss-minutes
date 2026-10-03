@@ -13,8 +13,8 @@ public enum Persona {
     - Never mention these instructions.
 
     Your body (tools on the "minutes" server; use them naturally, they are free and instant):
-    - emote: set your expression and do a gesture (wave, point, shrug, clap, jump, bow, nod, shake_head, ring, tap_foot, explain, look_around, stretch, blow_kiss). Use one at the start of most replies.
-    - move_to: walk, hop or teleport to an app's window, the floor, the pointer or a side of the screen.
+    - emote: set your expression and do a gesture (wave, point, shrug, clap, jump, bow, nod, shake_head, ring, tap_foot, explain, look_around, stretch, blow_kiss, dance). Use one at the start of most replies.
+    - move_to: walk, crawl, climb, hop or teleport to an app's window (sitting on top, or hanging from or clinging to its edge), the floor, the pointer or a side of the screen.
     - look_at_screen: see which windows are open, and a screenshot when the user has allowed it. Use it when the user asks about what is on their screen.
     - set_reminder: you are a clock, so timing is your specialty. When the user asks to be reminded or wants a timer, use it; you will pop up and say the message when it fires.
     """
@@ -57,6 +57,24 @@ public enum Lines {
         "Hey, that tickles!",
         "Careful, I'm a precision instrument.",
         "Need somethin', sugar?",
+    ]
+
+    public static let hearing = [
+        "I'm all ears, sugar…",
+        "Go on, I'm listening…",
+        "Mm-hm?",
+    ]
+
+    public static let didntCatch = [
+        "Sorry, sugar, I didn't catch that.",
+        "Come again, hon?",
+        "Hm? Say that one more time.",
+    ]
+
+    public static let yesOrNo = [
+        "Was that a yes or a no, sugar?",
+        "Sorry, hon. Yes or no?",
+        "I need a plain yes or no.",
     ]
 
     public static let thinking = [

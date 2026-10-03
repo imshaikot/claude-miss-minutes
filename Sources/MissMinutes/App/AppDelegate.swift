@@ -13,6 +13,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let store = SettingsStore()
     private(set) var stage: Stage!
     private(set) var voice: SpeechEngine!
+    private(set) var kokoro: KokoroVoice!
     private(set) var brain: ClaudeCodeBrain!
     private(set) var director: Director!
     private let bubble = BubbleController()
@@ -20,6 +21,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var menu: StatusMenuController!
     private var settingsWindow: SettingsWindowController?
     private var hotKey: HotKey?
+    private var holdKey: HoldKey?
     private var lastSettings = MinutesSettings()
     private var brainRestart: DispatchWorkItem?
     private var cancellables: Set<AnyCancellable> = []
@@ -30,16 +32,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         lastSettings = settings
 
         let stage = Stage(settings: settings.character)
-        let voice = SpeechEngine(settings: settings.voice)
+        let kokoro = Self.kokoroVoice { [unowned self] in self.store.settings }
+        let voice = SpeechEngine(settings: settings.voice, kokoro: kokoro)
         let brain = ClaudeCodeBrain(resumeSessionID: settings.brain.rememberConversation ? store.lastSessionID : nil) { [unowned self] resume in
             try self.launchPlan(resume: resume)
         }
         let puppet = Puppet(animator: stage.animator) { [weak stage] in stage?.directionToCursor() ?? CGPoint(x: 1, y: 0) }
         let director = Director(character: puppet, stage: stage, bubble: bubble, voice: voice, brain: brain,
-                                screenshots: ScreenCapturer(), scheduler: MainQueueScheduler(),
+                                ears: SpeechListener(), screenshots: ScreenCapturer(), scheduler: MainQueueScheduler(),
                                 settings: { [unowned self] in self.store.settings })
         self.stage = stage
         self.voice = voice
+        self.kokoro = kokoro
         self.brain = brain
         self.director = director
 
@@ -62,6 +66,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         menu = StatusMenuController(app: self)
         hotKey = HotKey(keyCode: HotKey.keyM, modifiers: HotKey.controlOption) { [weak self] in self?.director.summon() }
+        holdKey = HoldKey { [weak self] in self?.director.holdToTalk($0) }
+        if settings.listening.holdToTalk { holdKey?.start() }
 
         NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didActivateApplicationNotification)
             .compactMap { ($0.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication)?.localizedName }
@@ -74,12 +80,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             .store(in: &cancellables)
 
         // Resolve the login-shell PATH off the main thread, then bring up the
-        // body bridge and the brain so the first question is answered quickly.
+        // body bridge, the brain and her neural voice so the first question is
+        // answered quickly.
         DispatchQueue.global(qos: .userInitiated).async {
             _ = ExecutableLocator.loginPATH
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     self.bridge.start { _ in self.brain.start() }
+                    let voice = self.store.settings.voice
+                    if voice.enabled && voice.engine == .kokoro { self.kokoro.start() }
                 }
             }
         }
@@ -96,7 +105,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             case "ask": if let query, !query.isEmpty { director.ask(query) } else { director.summon() }
             case "summon": director.summon()
             case "show": stage.appear()
-            case "hide": stage.vanish()
+            case "hide": director.hide()
             case "settings": openSettings()
             default: break
             }
@@ -105,6 +114,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         brain?.stop()
+        kokoro?.stop()
         bridge.stop()
     }
 
@@ -128,6 +138,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if new.voice != old.voice { voice.apply(new.voice) }
         if !new.voice.enabled { voice.stop() }
         if !new.brain.rememberConversation { store.lastSessionID = nil }
+        if new.listening.holdToTalk { holdKey?.start() } else { holdKey?.stop() }
         if new.brain != old.brain {
             // Debounced: typing in the persona field shouldn't restart Claude Code per keystroke.
             brainRestart?.cancel()
@@ -166,15 +177,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     /// The MCP bridge script: bundled in the .app, or straight from the source tree under `swift run`.
-    static func bridgeScript() -> String? {
+    static func bridgeScript() -> String? { script("bridge/miss-minutes-mcp.mjs") }
+
+    private static func script(_ relativePath: String) -> String? {
         let fm = FileManager.default
-        if let bundled = Bundle.main.resourceURL?.appendingPathComponent("bridge/miss-minutes-mcp.mjs").path, fm.fileExists(atPath: bundled) {
+        if let bundled = Bundle.main.resourceURL?.appendingPathComponent(relativePath).path, fm.fileExists(atPath: bundled) {
             return bundled
         }
         let source = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-            .appendingPathComponent("bridge/miss-minutes-mcp.mjs").path
+            .appendingPathComponent(relativePath).path
         return fm.fileExists(atPath: source) ? source : nil
+    }
+
+    /// Her neural voice. Its packages and model live in
+    /// ~/Library/Application Support/Claude Miss Minutes/Voice once downloaded.
+    static func kokoroVoice(settings: @escaping () -> MinutesSettings) -> KokoroVoice {
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        let home = base.appendingPathComponent("Claude Miss Minutes/Voice", isDirectory: true)
+        return KokoroVoice(home: home) {
+            guard let node = ExecutableLocator.node(override: settings().brain.nodePath), let script = script("voice/miss-minutes-voice.mjs") else { return nil }
+            var environment = ProcessInfo.processInfo.environment
+            if let path = ExecutableLocator.loginPATH { environment["PATH"] = path }
+            return KokoroVoice.Runtime(node: node, script: script, environment: environment)
+        }
     }
 
     var bodyBridgeStatus: String {

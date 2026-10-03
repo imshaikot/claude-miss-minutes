@@ -4,17 +4,19 @@ import SwiftUI
 
 /// State behind the speech bubble.
 final class BubbleModel: ObservableObject {
-    enum Mode: Equatable { case hidden, input, thinking, reply, permission, notice }
+    enum Mode: Equatable { case hidden, input, hearing, thinking, reply, permission, notice }
     enum Tail { case bottom, left, right }
 
     @Published var mode: Mode = .hidden
     @Published var placeholder = ""
     @Published var input = ""
+    @Published var transcript = ""
     @Published var status: String?
     @Published var reply = ""
     @Published var notice = ""
     @Published var actions: [String] = []
     @Published var permission: PermissionRequest?
+    @Published var permissionVoice = PermissionVoice()
     @Published var tail: Tail = .bottom
 
     var onSubmit: (String) -> Void = { _ in }
@@ -72,6 +74,8 @@ struct BubbleView: View {
             case .input:
                 inputField
                 Text("Return to send · Esc to close").font(.system(size: 10)).foregroundStyle(BubbleStyle.muted)
+            case .hearing:
+                hearingBody
             case .thinking:
                 HStack(spacing: 8) {
                     ThinkingDots()
@@ -123,6 +127,22 @@ struct BubbleView: View {
             .onAppear { DispatchQueue.main.async { inputFocused = true } }
     }
 
+    private var hearingBody: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .top, spacing: 8) {
+                MicPulse().padding(.top, 2)
+                Text(model.transcript.isEmpty ? model.placeholder : model.transcript)
+                    .font(.system(size: 14, design: .rounded))
+                    .foregroundStyle(model.transcript.isEmpty ? BubbleStyle.muted : BubbleStyle.ink)
+                    .lineLimit(6)
+                    .truncationMode(.head)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Text("Let go of ⌃ to send · any other key cancels").font(.system(size: 10)).foregroundStyle(BubbleStyle.muted)
+        }
+    }
+
     private var replyText: some View {
         ScrollViewReader { proxy in
             ScrollView {
@@ -150,10 +170,26 @@ struct BubbleView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .background(RoundedRectangle(cornerRadius: 6).fill(Color.white))
                 .fixedSize(horizontal: false, vertical: true)
+            if let heard = model.permissionVoice.heard {
+                HStack(alignment: .top, spacing: 8) {
+                    MicPulse().padding(.top, 1)
+                    Text(heard.isEmpty ? "Listening for a yes or a no…" : heard)
+                        .font(.system(size: 13, design: .rounded))
+                        .foregroundStyle(heard.isEmpty ? BubbleStyle.muted : BubbleStyle.ink)
+                        .lineLimit(2)
+                        .truncationMode(.head)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
             HStack {
                 Spacer()
                 pill("Deny", primary: false) { model.onPermission(false) }
                 pill("Allow", primary: true) { model.onPermission(true) }
+            }
+            if let note = model.permissionVoice.note {
+                Text(note).font(.system(size: 10)).foregroundStyle(BubbleStyle.muted)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
     }
@@ -194,6 +230,20 @@ struct ThinkingDots: View {
             }
         }
         .onAppear { phase = true }
+    }
+}
+
+/// A microphone that breathes while she listens.
+struct MicPulse: View {
+    @State private var on = false
+    var body: some View {
+        Image(systemName: "mic.fill")
+            .font(.system(size: 13, weight: .bold))
+            .foregroundStyle(Color(red: 0.91, green: 0.45, blue: 0.11))
+            .opacity(on ? 1 : 0.35)
+            .scaleEffect(on ? 1.08 : 0.92)
+            .animation(.easeInOut(duration: 0.6).repeatForever(), value: on)
+            .onAppear { on = true }
     }
 }
 
@@ -270,7 +320,7 @@ public final class BubbleController: BubblePort {
         model.onAction = { [weak self] action in self?.onEvent?(.action(action)) }
         model.onClose = { [weak self] in
             guard let self else { return }
-            let wasInput = self.model.mode == .input
+            let wasInput = self.model.mode == .input || self.model.mode == .hearing
             self.hide(after: 0)
             self.onEvent?(wasInput ? .dismissed : .action("Close"))
         }
@@ -299,6 +349,12 @@ public final class BubbleController: BubblePort {
         panel.makeKeyAndOrderFront(nil)
     }
 
+    public func showHearing(_ transcript: String, placeholder: String) {
+        model.transcript = transcript
+        model.placeholder = placeholder
+        show(.hearing)
+    }
+
     public func showThinking(_ status: String) {
         model.status = status
         show(.thinking)
@@ -315,8 +371,9 @@ public final class BubbleController: BubblePort {
         show(.reply)
     }
 
-    public func showPermission(_ request: PermissionRequest) {
+    public func showPermission(_ request: PermissionRequest, voice: PermissionVoice) {
         model.permission = request
+        model.permissionVoice = voice
         show(.permission)
     }
 
