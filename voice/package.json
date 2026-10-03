@@ -1,0 +1,13 @@
+{
+  "name": "miss-minutes-voice",
+  "version": "0.1.0",
+  "description": "Miss Minutes' neural voice: Kokoro-82M on this Mac. The app installs these dependencies on request into Application Support; nothing here is bundled.",
+  "type": "module",
+  "private": true,
+  "license": "Apache-2.0",
+  "scripts": { "test": "node --test 'test/**/*.test.mjs'" },
+  "engines": { "node": ">=18" },
+  "dependencies": {
+    "kokoro-js": "1.2.1"
+  }
+}

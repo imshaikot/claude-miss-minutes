@@ -4,18 +4,22 @@ LSREGISTER := /System/Library/Frameworks/CoreServices.framework/Frameworks/Launc
 CLT := /Library/Developer/CommandLineTools/Library/Developer
 TEST_FLAGS := -Xswiftc -F$(CLT)/Frameworks -Xlinker -F$(CLT)/Frameworks -Xlinker -rpath -Xlinker $(CLT)/Frameworks -Xlinker -rpath -Xlinker $(CLT)/usr/lib
 
-.PHONY: build test test-swift test-bridge run sheet icon app dmg install clean
+.PHONY: build test test-swift test-bridge test-voice run sheet icon app dmg install clean
 
 build:
 	swift build
 
-test: test-swift test-bridge
+test: test-swift test-bridge test-voice
 
+# make test-swift FILTER=DirectorTests   (a suite, or a single test function name)
 test-swift:
-	swift test $(TEST_FLAGS)
+	swift test $(TEST_FLAGS) $(if $(FILTER),--filter $(FILTER))
 
 test-bridge:
 	cd bridge && node --test 'test/**/*.test.mjs'
+
+test-voice:
+	cd voice && node --test 'test/**/*.test.mjs'
 
 run: build
 	.build/debug/MissMinutes

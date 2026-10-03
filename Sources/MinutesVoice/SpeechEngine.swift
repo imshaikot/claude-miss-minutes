@@ -9,9 +9,10 @@ private let log = Logger(subsystem: "com.imshaikot.claude-miss-minutes", categor
 
 /// Text-to-speech with real lip sync.
 ///
-/// Sentences are synthesized to PCM buffers (`AVSpeechSynthesizer.write`) and
-/// played through an `AVAudioEngine`. While scheduling each buffer we record its
-/// loudness in 256-frame blocks; every animation frame `mouth()` looks up the
+/// Each sentence is rendered to PCM buffers, by Kokoro (a neural voice running
+/// on this Mac, once downloaded) or by a macOS voice (`AVSpeechSynthesizer.write`),
+/// and played through an `AVAudioEngine`. While scheduling each buffer we record
+/// its loudness in 256-frame blocks; every animation frame `mouth()` looks up the
 /// block that is playing right now, so the jaw follows the actual audio. Lip
 /// rounding comes from the letters at the current position in the sentence.
 @MainActor
@@ -20,28 +21,37 @@ public final class SpeechEngine: NSObject, VoicePort {
     public private(set) var isSpeaking = false
 
     private var settings: VoiceSettings
+    private let kokoro: KokoroVoice?
     private let synth = AVSpeechSynthesizer()
     private let engine = AVAudioEngine()
     private let player = AVAudioPlayerNode()
     private var connectedFormat: AVAudioFormat?
     private var queue: [String] = []
-    private var synthesizing = false
+    /// The sentence being rendered. Its token goes stale when speech stops or
+    /// the sentence is handed to the other voice, so late audio is dropped.
+    private var rendering: (text: String, token: Int, neural: Bool)?
+    private var token = 0
     private var receivedAudio = false
-    private var writeStartedAt: CFTimeInterval = 0
+    private var renderStartedAt: CFTimeInterval = 0
+    private var waitingForKokoroSince: CFTimeInterval?
     private var scheduledFrames: AVAudioFramePosition = 0
     private var envelope: [Float] = []
     private let block: AVAudioFrameCount = 256
     private var segments: [(start: AVAudioFramePosition, end: AVAudioFramePosition?, text: String)] = []
     private var jaw: CGFloat = 0
-    private var generation = 0
     private var fallbackSpeaking = false
     private var watchdog: Timer?
 
-    public init(settings: VoiceSettings) {
+    public init(settings: VoiceSettings, kokoro: KokoroVoice? = nil) {
         self.settings = settings
+        self.kokoro = kokoro
         super.init()
         engine.attach(player)
         synth.delegate = self
+        // Deferred: `pump()` itself starts Kokoro, which changes its state.
+        kokoro?.onStateChange = { [weak self] _ in
+            DispatchQueue.main.async { MainActor.assumeIsolated { self?.pump() } }
+        }
         // macOS stops the engine on its own thread when the output device changes
         // (headphones, display audio); reconnect instead of playing into a stopped engine.
         NotificationCenter.default.addObserver(forName: .AVAudioEngineConfigurationChange, object: engine, queue: .main) { [weak self] _ in
@@ -52,6 +62,8 @@ public final class SpeechEngine: NSObject, VoicePort {
     public func apply(_ settings: VoiceSettings) {
         self.settings = settings
         player.volume = Float(settings.volume)
+        // The neural voice holds a few hundred MB; keep it only while it's her voice.
+        if settings.enabled && settings.engine == .kokoro { kokoro?.start() } else { kokoro?.stop() }
     }
 
     // MARK: VoicePort
@@ -68,10 +80,11 @@ public final class SpeechEngine: NSObject, VoicePort {
     }
 
     public func stop() {
-        generation += 1
+        token += 1
+        rendering = nil
         queue.removeAll()
         synth.stopSpeaking(at: .immediate)
-        synthesizing = false
+        kokoro?.cancelAll()
         fallbackSpeaking = false
         if isSpeaking { reset() }
     }
@@ -107,8 +120,7 @@ public final class SpeechEngine: NSObject, VoicePort {
     }
 
     public static func availableVoices() -> [VoiceOption] {
-        AVSpeechSynthesisVoice.speechVoices()
-            .filter { $0.language.hasPrefix("en") }
+        englishVoices()
             .sorted { ($0.quality.rawValue, $1.name) > ($1.quality.rawValue, $0.name) }
             .map { VoiceOption(id: $0.identifier, name: $0.name, language: $0.language, quality: label($0.quality)) }
     }
@@ -121,10 +133,20 @@ public final class SpeechEngine: NSObject, VoicePort {
         }
     }
 
+    /// True when an Enhanced or Premium English voice is installed. The compact
+    /// voices macOS starts with are the robotic-sounding ones.
+    public static var hasNaturalVoice: Bool {
+        englishVoices().contains { $0.quality != .default }
+    }
+
+    /// English voices, minus the novelty ones (Bells, Bubbles, Zarvox…).
+    private static func englishVoices() -> [AVSpeechSynthesisVoice] {
+        AVSpeechSynthesisVoice.speechVoices().filter { $0.language.hasPrefix("en") && !$0.voiceTraits.contains(.isNoveltyVoice) }
+    }
+
     /// Best installed English voice that suits her: a higher-quality female US voice if present.
     static func preferredVoice() -> AVSpeechSynthesisVoice? {
-        let voices = AVSpeechSynthesisVoice.speechVoices().filter { $0.language.hasPrefix("en") }
-        let ranked = voices.sorted { a, b in
+        let ranked = englishVoices().sorted { a, b in
             func score(_ v: AVSpeechSynthesisVoice) -> Int {
                 var s = v.quality.rawValue * 10
                 if v.language == "en-US" { s += 5 }
@@ -149,32 +171,81 @@ public final class SpeechEngine: NSObject, VoicePort {
         return u
     }
 
+    private var wantsKokoro: Bool { settings.engine == .kokoro && kokoro?.isInstalled == true }
+
     private func pump() {
-        guard !synthesizing, !fallbackSpeaking, !queue.isEmpty else { return }
-        let text = queue.removeFirst()
-        synthesizing = true
+        guard isSpeaking, rendering == nil, !fallbackSpeaking, !queue.isEmpty else { return }
+        if wantsKokoro, let kokoro {
+            if kokoro.state == .stopped { kokoro.start() }
+            switch kokoro.state {
+            case .ready:
+                waitingForKokoroSince = nil
+                return render(queue.removeFirst(), neural: true)
+            case .starting:
+                // Wait for her real voice rather than open with a different one;
+                // after a while, the macOS voice steps in.
+                let since = waitingForKokoroSince ?? CACurrentMediaTime()
+                waitingForKokoroSince = since
+                if CACurrentMediaTime() - since < 12 { return }
+            default:
+                break
+            }
+        }
+        render(queue.removeFirst(), neural: false)
+    }
+
+    private func render(_ text: String, neural: Bool) {
+        token += 1
+        let current = token
+        rendering = (text, current, neural)
         receivedAudio = false
-        writeStartedAt = CACurrentMediaTime()
+        renderStartedAt = CACurrentMediaTime()
         segments.append((scheduledFrames, nil, text))
-        let gen = generation
-        let utterance = makeUtterance(text)
-        synth.write(utterance) { [weak self] buffer in
+        if neural, let kokoro {
+            kokoro.speak(text, voice: settings.kokoroVoice, speed: settings.kokoroSpeed) { [weak self] event in
+                guard let self, self.rendering?.token == current else { return }
+                switch event {
+                case let .audio(pcm):
+                    self.play(pcm)
+                case .done:
+                    self.rendered()
+                case let .failed(reason):
+                    log.error("Kokoro could not say a sentence (\(reason, privacy: .public)); using the macOS voice")
+                    self.fallBackToSystemVoice()
+                }
+            }
+            return
+        }
+        synth.write(makeUtterance(text)) { [weak self] buffer in
             DispatchQueue.main.async {
-                MainActor.assumeIsolated { self?.receive(buffer, generation: gen, utterance: utterance) }
+                MainActor.assumeIsolated {
+                    guard let self, self.rendering?.token == current, let pcm = buffer as? AVAudioPCMBuffer else { return }
+                    if pcm.frameLength == 0 { self.rendered() } else { self.play(pcm) }
+                }
             }
         }
     }
 
-    private func receive(_ buffer: AVAudioBuffer, generation gen: Int, utterance: AVSpeechUtterance) {
-        guard gen == generation, let pcm = buffer as? AVAudioPCMBuffer else { return }
-        guard pcm.frameLength > 0 else {
-            if let last = segments.indices.last { segments[last].end = scheduledFrames }
-            synthesizing = false
-            pump()
-            return
-        }
+    private func rendered() {
+        if let last = segments.indices.last { segments[last].end = scheduledFrames }
+        rendering = nil
+        pump()
+    }
+
+    /// Kokoro failed or stalled on this sentence: say it with the macOS voice.
+    private func fallBackToSystemVoice() {
+        guard let current = rendering, current.neural else { return }
+        kokoro?.cancelAll()
+        if receivedAudio { return rendered() } // part of it was already said
+        segments.removeLast()
+        rendering = nil
+        render(current.text, neural: false)
+    }
+
+    private func play(_ buffer: AVAudioPCMBuffer) {
+        guard buffer.frameLength > 0 else { return }
         receivedAudio = true
-        guard prepareEngine(for: pcm.format) else { return }
+        guard prepareEngine(for: buffer.format), let pcm = conformed(buffer) else { return }
         if let data = pcm.floatChannelData?[0] {
             var offset: AVAudioFrameCount = 0
             while offset < pcm.frameLength {
@@ -195,6 +266,27 @@ public final class SpeechEngine: NSObject, VoicePort {
             return
         }
         scheduledFrames += AVAudioFramePosition(pcm.frameLength)
+    }
+
+    /// Audio in the format the player is connected with. Reconnecting mid-reply
+    /// would cut off what is queued, so a sentence in another format (the other
+    /// voice stepping in) is resampled instead.
+    private func conformed(_ pcm: AVAudioPCMBuffer) -> AVAudioPCMBuffer? {
+        guard let target = connectedFormat, pcm.format != target else { return pcm }
+        let capacity = AVAudioFrameCount((Double(pcm.frameLength) * target.sampleRate / pcm.format.sampleRate).rounded(.up)) + 32
+        guard let converter = AVAudioConverter(from: pcm.format, to: target),
+              let out = AVAudioPCMBuffer(pcmFormat: target, frameCapacity: capacity) else { return nil }
+        let input = OneBuffer(pcm)
+        var error: NSError?
+        let status = converter.convert(to: out, error: &error) { _, inputStatus in
+            guard let buffer = input.take() else {
+                inputStatus.pointee = .endOfStream
+                return nil
+            }
+            inputStatus.pointee = .haveData
+            return buffer
+        }
+        return status == .error ? nil : out
     }
 
     /// The engine stopped underneath us: drop what was queued for playback,
@@ -242,21 +334,22 @@ public final class SpeechEngine: NSObject, VoicePort {
         }
     }
 
-    /// Detects the end of playback, and falls back to plain `speak()` for voices
-    /// that cannot render to buffers.
+    /// Detects the end of playback, gives up on a stalled neural voice, and
+    /// falls back to plain `speak()` for macOS voices that cannot render to buffers.
     private func checkProgress() {
         guard isSpeaking else { return }
-        if synthesizing, !receivedAudio, CACurrentMediaTime() - writeStartedAt > 2.0 {
-            generation += 1
+        if let current = rendering, !receivedAudio, CACurrentMediaTime() - renderStartedAt > (current.neural ? 8 : 2) {
+            if current.neural { return fallBackToSystemVoice() }
+            token += 1
+            rendering = nil
             synth.stopSpeaking(at: .immediate)
-            synthesizing = false
-            if let segment = segments.popLast() {
-                fallbackSpeaking = true
-                synth.speak(makeUtterance(segment.text))
-            }
+            segments.removeLast()
+            fallbackSpeaking = true
+            synth.speak(makeUtterance(current.text))
             return
         }
-        guard !synthesizing, !fallbackSpeaking, queue.isEmpty else { return }
+        if rendering == nil, waitingForKokoroSince != nil { pump() }
+        guard rendering == nil, !fallbackSpeaking, queue.isEmpty else { return }
         let played = playedFrames() ?? scheduledFrames
         if played >= scheduledFrames {
             reset()
@@ -266,6 +359,7 @@ public final class SpeechEngine: NSObject, VoicePort {
 
     private func reset() {
         isSpeaking = false
+        waitingForKokoroSince = nil
         watchdog?.invalidate()
         watchdog = nil
         _ = MMCatchException {
@@ -276,6 +370,16 @@ public final class SpeechEngine: NSObject, VoicePort {
         envelope.removeAll()
         segments.removeAll()
         jaw = 0
+    }
+}
+
+/// Feeds one buffer to `AVAudioConverter`, whose input block runs synchronously inside `convert`.
+private final class OneBuffer: @unchecked Sendable {
+    private var buffer: AVAudioPCMBuffer?
+    init(_ buffer: AVAudioPCMBuffer) { self.buffer = buffer }
+    func take() -> AVAudioPCMBuffer? {
+        defer { buffer = nil }
+        return buffer
     }
 }
 

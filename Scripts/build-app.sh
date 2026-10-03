@@ -14,13 +14,19 @@ HOST_ARCH="$(uname -m)"
 cd "$ROOT"
 
 echo "▸ Building Miss Minutes $VERSION ($BUILD_NUMBER) for: $ARCHS"
+mkdir -p "$DIST"
 slices=()
 for arch in $ARCHS; do
-  swift build -c release --triple "${arch}-apple-macosx14.0" --product MissMinutes
-  slices+=(".build/${arch}-apple-macosx/release/MissMinutes")
+  build=(swift build -c release --triple "${arch}-apple-macosx14.0" --product MissMinutes)
+  "${build[@]}"
+  # Where the binary lands depends on the toolchain's build system (swiftbuild
+  # puts every arch in one folder), so ask, and copy it out before the next arch.
+  slice="$DIST/MissMinutes-$arch"
+  cp "$("${build[@]}" --show-bin-path)/MissMinutes" "$slice"
+  lipo "$slice" -verify_arch "$arch"
+  slices+=("$slice")
 done
 
-mkdir -p "$DIST"
 BIN="$DIST/MissMinutes.bin"
 if [ ${#slices[@]} -gt 1 ]; then
   lipo -create "${slices[@]}" -output "$BIN"
@@ -30,19 +36,22 @@ fi
 
 if [ ! -f "$DIST/AppIcon.icns" ]; then
   echo "▸ Rendering the app icon with the character renderer"
-  HOST_BIN=".build/${HOST_ARCH}-apple-macosx/release/MissMinutes"
+  HOST_BIN="$DIST/MissMinutes-$HOST_ARCH"
   [ -x "$HOST_BIN" ] || HOST_BIN="$BIN"
   "$ROOT/Scripts/make-icns.sh" "$DIST/AppIcon.icns" "$HOST_BIN"
 fi
+rm -f "${slices[@]}"
 
 echo "▸ Assembling $APP"
 rm -rf "$APP"
-mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources/bridge"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources/bridge" "$APP/Contents/Resources/voice"
 mv "$BIN" "$APP/Contents/MacOS/MissMinutes"
 sed -e "s/__VERSION__/$VERSION/" -e "s/__BUILD__/$BUILD_NUMBER/" Packaging/Info.plist > "$APP/Contents/Info.plist"
 printf 'APPL????' > "$APP/Contents/PkgInfo"
 cp "$DIST/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
 cp bridge/miss-minutes-mcp.mjs bridge/package.json "$APP/Contents/Resources/bridge/"
+# Only the neural voice's installer: its packages and model are downloaded on request.
+cp voice/miss-minutes-voice.mjs voice/package.json voice/package-lock.json "$APP/Contents/Resources/voice/"
 
 echo "▸ Signing (ad-hoc)"
 codesign --force --deep --sign "${CODESIGN_IDENTITY:--}" --timestamp=none "$APP"
