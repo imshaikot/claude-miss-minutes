@@ -4,7 +4,7 @@
 
 <p align="center">An animated 1950s-cartoon clock who lives on your Mac desktop as a personal assistant, with Claude Code as her brain.</p>
 
-<p align="center"><img src="docs/model-sheet.png" alt="Model sheet: every pose and mood, rendered by the app's own renderer"></p>
+https://github.com/user-attachments/assets/f09c1bb5-2f68-4abd-9c0a-f0e1264d2623
 
 > An unofficial fan homage to a certain time-keeping hostess. The character is original vector art drawn in code; nothing here is affiliated with Marvel or Disney.
 
