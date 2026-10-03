@@ -1,7 +1,7 @@
 import Foundation
 
 public enum TravelStyle: String, Codable, CaseIterable {
-    case auto, walk, hop, teleport
+    case auto, walk, crawl, hop, teleport
 }
 
 /// What the brain can ask her body to do. Decoded from the body bridge (the
@@ -47,12 +47,13 @@ public enum BodyCommand: Equatable {
             case "app", "window":
                 guard let app = string("app") else { throw DecodeError(description: "target \"app\" needs an \"app\" name.") }
                 return .moveTo(.app(app), style: style)
+            case "hang", "edge", "cling": return .moveTo(.hang(app: string("app")), style: style)
             case "floor", "dock", "bottom": return .moveTo(.floor, style: style)
             case "pointer", "cursor", "mouse": return .moveTo(.cursor, style: style)
             case "left": return .moveTo(.screenSide(left: true), style: style)
             case "right": return .moveTo(.screenSide(left: false), style: style)
             case "random", "anywhere": return .moveTo(.random, style: style)
-            case let other: throw DecodeError(description: "Unknown target \"\(other)\". Use app, floor, pointer, left, right or random.")
+            case let other: throw DecodeError(description: "Unknown target \"\(other)\". Use app, hang, floor, pointer, left, right or random.")
             }
 
         case "look_at_screen":

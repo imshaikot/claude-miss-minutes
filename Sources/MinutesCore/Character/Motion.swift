@@ -6,20 +6,31 @@ import Foundation
 /// sync) is layered on by the `Animator`.
 public enum BaseMotion: String, CaseIterable {
     case stand, sit, float, walk, hop, fall, dangle
+    /// On all fours along a ledge.
+    case crawl
+    /// Hanging by her hands from a window's bottom edge, and moving along it hand over hand.
+    case hang, shimmy
+    /// Holding on to a window's side, and climbing up or down it.
+    case cling, climb
 }
 
 /// Inputs a base motion needs besides time, fed by the stage each frame.
 public struct MotionContext: Equatable {
     /// Seconds since this motion started.
     public var time: Double = 0
-    /// -1 facing left, 1 facing right.
+    /// -1 facing left, 1 facing right. Clinging and climbing: the side her window is on.
     public var facing: CGFloat = 1
-    /// Walk cycles completed; the stage advances it from distance travelled so feet never slide.
+    /// Gait cycles completed (walk, crawl, climb, shimmy); the stage advances it
+    /// from distance travelled so planted hands and feet never slide.
     public var walkPhase: Double = 0
     /// Hop progress 0…1.
     public var progress: CGFloat = 0
     /// Anchor velocity in points per second.
     public var velocity = CGPoint.zero
+    /// The hop ends hanging from or clinging to an edge: arms up to catch it.
+    public var grab = false
+    /// Climbing: 1 going up a window's side, -1 going down.
+    public var climb: CGFloat = 1
 
     public init() {}
 }
@@ -31,6 +42,22 @@ private func P(_ x: CGFloat, _ y: CGFloat) -> CGPoint { CGPoint(x: x, y: y) }
 public enum Motions {
     /// Stride length of one step at scale 1. Walk speed / (2 × stride) = cycles per second.
     public static let stride: CGFloat = 30
+    /// Height of her hands above the anchor while hanging from an edge.
+    public static let hangGrip: CGFloat = 166
+    /// Half the distance between her hands while hanging: wide, so her arms run up her sides.
+    public static let hangSpread: CGFloat = 44
+    /// How far out from the anchor her hands grip a window's side while clinging.
+    public static let clingGrip: CGFloat = 56
+
+    /// Distance one limb covers per half cycle, for each gait.
+    public static func stride(for motion: BaseMotion) -> CGFloat {
+        switch motion {
+        case .crawl: return 20
+        case .climb: return 24
+        case .shimmy: return 22
+        default: return stride
+        }
+    }
 
     public static func pose(_ motion: BaseMotion, _ c: MotionContext) -> Pose {
         switch motion {
@@ -41,7 +68,28 @@ public enum Motions {
         case .hop: return hop(c)
         case .fall: return fall(c)
         case .dangle: return dangle(c)
+        case .crawl: return crawl(c)
+        case .hang: return hang(c)
+        case .shimmy: return shimmy(c)
+        case .cling: return cling(c)
+        case .climb: return climb(c)
         }
+    }
+
+    /// One limb's step cycle at `phase` (in cycles): planted for the first
+    /// half, sliding back one stride relative to her as she passes over it,
+    /// then swinging forward. Returns the offset along her way and the lift 0…1.
+    static func step(_ phase: Double, stride: CGFloat) -> (along: CGFloat, lift: CGFloat) {
+        var u = phase.truncatingRemainder(dividingBy: 1)
+        if u < 0 { u += 1 }
+        if u < 0.5 { return (stride / 2 - stride * CGFloat(u / 0.5), 0) }
+        let s = CGFloat((u - 0.5) / 0.5)
+        return (-stride / 2 + stride * smoothstep(s), bump(s))
+    }
+
+    /// A point in anchor space, in the body space of `p` (where hands live).
+    static func inBody(_ point: CGPoint, _ p: Pose) -> CGPoint {
+        (point - p.body).rotated(by: -p.tilt)
     }
 
     static func stand(_ c: MotionContext) -> Pose {
@@ -161,6 +209,19 @@ public enum Motions {
             p.leftHand = P(-54, -46); p.rightHand = P(54, -46)
             p.leftLegBend = 10 * crouch; p.rightLegBend = 10 * crouch
             p.shadow = 1
+        } else if c.grab {
+            // Reaching for an edge to hang from: arms stay up and close round it, no landing crouch.
+            let u = clamp((pr - 0.18) / 0.82, 0, 1)
+            p.body = P(0, 96 - 6 * u)
+            p.squash = lerp(1.15, 1.04, u)
+            p.tilt = -0.12 * f * (1 - u)
+            p.leftHand = P(-hangSpread, 68 + 8 * u); p.rightHand = P(hangSpread, 68 + 8 * u)
+            p.leftArmBend = 9; p.rightArmBend = 9
+            p.leftHandShape = u > 0.75 ? .fist : .open
+            p.rightHandShape = u > 0.75 ? .fist : .open
+            p.leftFoot = P(-12, 14 - 8 * u); p.rightFoot = P(12, 10 - 6 * u)
+            p.leftLegBend = 8; p.rightLegBend = 8
+            p.shadow = 0
         } else if pr < 0.82 {
             let u = (pr - 0.18) / 0.64
             p.body = P(0, 96)
@@ -216,6 +277,153 @@ public enum Motions {
         p.leftFootAngle = -trail * 0.01; p.rightFootAngle = -trail * 0.01
         p.leftLegBend = 3; p.rightLegBend = 3
         p.shadow = 0
+        return p
+    }
+
+    /// On all fours, low and leaning into the way she's going. Each hand moves
+    /// with the opposite knee, and whatever is planted stays put on screen.
+    static func crawl(_ c: MotionContext) -> Pose {
+        var p = Pose()
+        let f: CGFloat = c.facing >= 0 ? 1 : -1
+        let s = stride(for: .crawl)
+        let a = c.walkPhase * 2 * .pi
+        p.facing = f
+        p.faceShift = P(0.6 * f, -0.2)
+        p.body = P(-6 * f, 56 + 3 * abs(CGFloat(sin(a))))
+        p.squash = 0.94 + 0.02 * CGFloat(cos(2 * a))
+        p.tilt = -0.42 * f + 0.03 * CGFloat(sin(a))
+        let lead = step(c.walkPhase, stride: s), trail = step(c.walkPhase + 0.5, stride: s)
+        // The hand on her facing side reaches ahead in front of her; the other paws from behind her.
+        let leadHand = inBody(P(f * (46 + lead.along), 3 + 9 * lead.lift), p)
+        let trailHand = inBody(P(f * (26 + trail.along), 3 + 9 * trail.lift), p)
+        // Knees down behind her: shoes upturned, soles to the sky.
+        let leadFoot = P(f * (-34 + trail.along), 9 + 8 * trail.lift)
+        let trailFoot = P(f * (-50 + lead.along), 9 + 8 * lead.lift)
+        if f > 0 {
+            p.rightHand = leadHand; p.leftHand = trailHand; p.leftArmBehind = true
+            p.rightFoot = leadFoot; p.leftFoot = trailFoot
+        } else {
+            p.leftHand = leadHand; p.rightHand = trailHand; p.rightArmBehind = true
+            p.leftFoot = leadFoot; p.rightFoot = trailFoot
+        }
+        p.leftHandAngle = -0.9; p.rightHandAngle = -0.9
+        p.leftArmBend = 3; p.rightArmBend = 3
+        p.leftLegBend = 12; p.rightLegBend = 12
+        p.leftFootAngle = 2.8 - 0.3 * (f > 0 ? lead.lift : trail.lift)
+        p.rightFootAngle = 2.8 - 0.3 * (f > 0 ? trail.lift : lead.lift)
+        p.shadow = 1
+        return p
+    }
+
+    /// The pendulum she makes hanging from her hands: body under the grip, swung by `swing` radians.
+    private static func hanging(swing: CGFloat) -> Pose {
+        var p = Pose()
+        let length = hangGrip - 90
+        p.body = P(length * sin(swing), hangGrip - length * cos(swing))
+        p.tilt = swing
+        p.leftHandShape = .fist; p.rightHandShape = .fist
+        p.leftArmBend = 9; p.rightArmBend = 9
+        p.shadow = 0
+        return p
+    }
+
+    /// Hanging from an edge by both hands: a slow sway, legs dangling and now and then kicking.
+    static func hang(_ c: MotionContext) -> Pose {
+        let t = c.time
+        var p = hanging(swing: 0.06 * CGFloat(sin(t * 2 * .pi / 2.8)) + 0.03 * noise(t * 0.6, seed: 3))
+        p.squash = 1.05 + 0.01 * CGFloat(sin(t * 2 * .pi / 1.4))
+        p.leftHand = inBody(P(-hangSpread, hangGrip), p)
+        p.rightHand = inBody(P(hangSpread, hangGrip), p)
+        let kick = clamp(noise(t * 0.45, seed: 9) * 1.8, 0, 1)
+        let pedal = t * 2 * .pi * 1.3
+        let drift = p.body.x * 1.3
+        for side: CGFloat in [-1, 1] {
+            let phase = pedal + (side < 0 ? 0 : .pi)
+            let foot = P(drift + side * 11 + 3 * CGFloat(sin(phase)) * (0.4 + kick), 4 + 12 * kick * max(0, CGFloat(sin(phase))))
+            if side < 0 { p.leftFoot = foot; p.leftFootAngle = -0.5 + 0.3 * kick } else { p.rightFoot = foot; p.rightFootAngle = -0.5 + 0.3 * kick }
+        }
+        p.leftLegBend = 4 + 6 * kick; p.rightLegBend = 4 + 6 * kick
+        return p
+    }
+
+    /// Hand over hand along the edge she hangs from, legs trailing.
+    static func shimmy(_ c: MotionContext) -> Pose {
+        let f: CGFloat = c.facing >= 0 ? 1 : -1
+        let s = stride(for: .shimmy)
+        let a = c.walkPhase * 2 * .pi
+        var p = hanging(swing: 0.05 * CGFloat(sin(a)) - 0.04 * f)
+        p.facing = 0.4 * f
+        p.faceShift = P(0.4 * f, 0.1)
+        p.squash = 1.04
+        let right = step(c.walkPhase + (f > 0 ? 0 : 0.5), stride: s)
+        let left = step(c.walkPhase + (f > 0 ? 0.5 : 0), stride: s)
+        p.rightHand = inBody(P(hangSpread + f * right.along, hangGrip - 7 * right.lift), p)
+        p.leftHand = inBody(P(-hangSpread + f * left.along, hangGrip - 7 * left.lift), p)
+        let drift = p.body.x * 1.3 - 6 * f
+        p.leftFoot = P(drift - 11 + 3 * CGFloat(sin(a)), 5 + 3 * CGFloat(cos(a)))
+        p.rightFoot = P(drift + 11 + 3 * CGFloat(sin(a + .pi)), 5 + 3 * CGFloat(cos(a + .pi)))
+        p.leftFootAngle = -0.4; p.rightFootAngle = -0.4
+        p.leftLegBend = 5; p.rightLegBend = 5
+        return p
+    }
+
+    /// Holding on to a window's side (which is toward `facing`): the near hand
+    /// high on the edge, the far one lower and reaching round behind her,
+    /// shoes braced on the frame, leaning out to look at you.
+    static func cling(_ c: MotionContext) -> Pose {
+        var p = Pose()
+        let f: CGFloat = c.facing >= 0 ? 1 : -1
+        let t = c.time
+        let sway = CGFloat(sin(t * 2 * .pi / 3.2))
+        p.facing = 0.5 * f
+        p.body = P(-6 * f + 1.5 * sway, 94 + 1.2 * CGFloat(sin(t * 2 * .pi / 1.6)))
+        p.tilt = 0.07 * f + 0.02 * sway
+        p.faceShift = P(-0.3 * f, 0.05)
+        let near = inBody(P(f * clingGrip, 148), p)
+        let far = inBody(P(f * clingGrip, 84), p)
+        let nearFoot = P(f * 58, 30 + sway)
+        let farFoot = P(f * 56, 4)
+        brace(&p, facing: f, hands: (near, far), feet: (nearFoot, farFoot))
+        return p
+    }
+
+    /// Hands and shoes on a window's side toward `facing`: the far arm reaches
+    /// round behind her, soles flat on the frame, the far leg tucked under.
+    private static func brace(_ p: inout Pose, facing f: CGFloat, hands: (near: CGPoint, far: CGPoint), feet: (near: CGPoint, far: CGPoint)) {
+        if f > 0 {
+            p.rightHand = hands.near; p.leftHand = hands.far; p.leftArmBehind = true
+            p.rightFoot = feet.near; p.leftFoot = feet.far
+            p.rightLegBend = 6; p.leftLegBend = -6
+        } else {
+            p.leftHand = hands.near; p.rightHand = hands.far; p.rightArmBehind = true
+            p.leftFoot = feet.near; p.rightFoot = feet.far
+            p.leftLegBend = 6; p.rightLegBend = -6
+        }
+        p.leftHandShape = .fist; p.rightHandShape = .fist
+        p.leftHandAngle = 1.1; p.rightHandAngle = 1.1
+        p.leftArmBend = 6; p.rightArmBend = 6
+        p.leftFootAngle = 1.2; p.rightFootAngle = 1.2
+        p.shadow = 0
+    }
+
+    /// Hand over hand up or down a window's side, shoes walking the frame.
+    static func climb(_ c: MotionContext) -> Pose {
+        var p = Pose()
+        let f: CGFloat = c.facing >= 0 ? 1 : -1
+        let v: CGFloat = c.climb >= 0 ? 1 : -1
+        let s = stride(for: .climb)
+        let a = c.walkPhase * 2 * .pi
+        p.facing = 0.5 * f
+        p.body = P(-4 * f, 94 + 2.5 * CGFloat(sin(2 * a)))
+        p.tilt = 0.05 * f + 0.04 * CGFloat(sin(a))
+        p.faceShift = P(0.35 * f, 0.35 * v)
+        let nearStep = step(c.walkPhase, stride: s), farStep = step(c.walkPhase + 0.5, stride: s)
+        let near = inBody(P(f * (clingGrip - 5 * nearStep.lift), 146 + v * nearStep.along), p)
+        let far = inBody(P(f * (clingGrip - 5 * farStep.lift), 90 + v * farStep.along), p)
+        // Each foot pushes off the frame with the opposite hand.
+        let nearFoot = P(f * (58 - 6 * farStep.lift), 30 + v * farStep.along)
+        let farFoot = P(f * (56 - 6 * nearStep.lift), 6 + v * nearStep.along)
+        brace(&p, facing: f, hands: (near, far), feet: (nearFoot, farFoot))
         return p
     }
 }

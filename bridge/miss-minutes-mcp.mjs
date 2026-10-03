@@ -17,7 +17,7 @@ import { pathToFileURL } from 'node:url';
 export const SERVER_INFO = { name: 'minutes', version: '0.1.0' };
 
 export const MOODS = ['neutral', 'happy', 'excited', 'thinking', 'surprised', 'sly', 'sad', 'annoyed', 'love', 'worried', 'sleepy'];
-export const GESTURES = ['wave', 'point', 'shrug', 'clap', 'jump', 'bow', 'nod', 'shake_head', 'ring', 'tap_foot', 'explain', 'look_around', 'stretch', 'blow_kiss'];
+export const GESTURES = ['wave', 'point', 'shrug', 'clap', 'jump', 'bow', 'nod', 'shake_head', 'ring', 'tap_foot', 'explain', 'look_around', 'stretch', 'blow_kiss', 'dance'];
 
 export const TOOLS = [
   {
@@ -34,17 +34,17 @@ export const TOOLS = [
   },
   {
     name: 'move_to',
-    description: "Move Miss Minutes somewhere on the screen. She walks, hops or teleports (hologram style) depending on the distance, and replies once she has arrived.",
+    description: "Move Miss Minutes somewhere on the screen. She walks, crawls, climbs and hops along window edges, or teleports (hologram style) when it's far, and replies once she has arrived.",
     inputSchema: {
       type: 'object',
       properties: {
         target: {
           type: 'string',
-          enum: ['app', 'floor', 'pointer', 'left', 'right', 'random'],
-          description: 'app: sit on a window of the app named in "app". floor: stand on the Dock / bottom of the screen. pointer: come next to the mouse pointer. left/right: a bottom corner. random: any sensible spot.',
+          enum: ['app', 'hang', 'floor', 'pointer', 'left', 'right', 'random'],
+          description: 'app: sit on a window of the app named in "app". hang: hang from or cling to an edge of that app\'s window (the frontmost app if "app" is omitted). floor: stand on the Dock / bottom of the screen. pointer: come next to the mouse pointer. left/right: a bottom corner. random: any sensible spot.',
         },
-        app: { type: 'string', description: 'App name for target "app", e.g. "Safari" or "Xcode".' },
-        style: { type: 'string', enum: ['auto', 'walk', 'hop', 'teleport'], description: 'How to travel. Default auto.' },
+        app: { type: 'string', description: 'App name for target "app" or "hang", e.g. "Safari" or "Xcode".' },
+        style: { type: 'string', enum: ['auto', 'walk', 'crawl', 'hop', 'teleport'], description: 'How to travel. Default auto.' },
       },
       required: ['target'],
       additionalProperties: false,
